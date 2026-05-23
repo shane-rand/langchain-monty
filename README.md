@@ -1,6 +1,6 @@
 # langchain-monty
 
-LangChain middleware that gives a [deepagents](https://github.com/pydantic/deepagents) agent an `eval_python` tool backed by [pydantic-monty](https://github.com/pydantic/pydantic-monty) — Pydantic's Rust-implemented, sandboxed Python interpreter.
+LangChain middleware that gives a [deepagents](https://github.com/pydantic/deepagents) agent an `eval_python` tool backed by [pydantic-monty](https://github.com/pydantic/monty) — Pydantic's Rust-implemented, sandboxed Python interpreter.
 
 The interpreter starts in microseconds, runs in-process, and has zero access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist via the `ptc=` parameter.
 
