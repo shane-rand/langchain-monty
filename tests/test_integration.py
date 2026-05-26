@@ -12,14 +12,13 @@ import uuid
 from typing import Any
 
 import pytest
+from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolCall
-from langchain_core.outputs import ChatGenerationChunk, ChatResult, ChatGeneration
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
-from deepagents import create_deep_agent
 from langchain_monty import MontyCodeInterpreterMiddleware, MontyLimits
-
 
 # --------------------------------------------------------------------------- #
 # Fake model                                                                  #
@@ -107,8 +106,18 @@ class TestAgentCreation:
         assert "tools" in tool_names
 
     def test_multiple_middleware_instances_independent(self):
-        a1 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=["x"]))
-        a2 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=["y"]))
+        @tool
+        def x() -> int:
+            """Tool x."""
+            return 1
+
+        @tool
+        def y() -> int:
+            """Tool y."""
+            return 2
+
+        a1 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=[x]))
+        a2 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=[y]))
         assert a1 is not a2
 
 
@@ -197,7 +206,7 @@ class TestPtcHostToolCalling:
         agent = _agent(
             _eval_call("multiply(6, 7)"),
             _done(),
-            middleware=MontyCodeInterpreterMiddleware(ptc=["multiply"]),
+            middleware=MontyCodeInterpreterMiddleware(ptc=[multiply]),
             tools=[multiply],
         )
         result = agent.invoke({"messages": [{"role": "user", "content": "go"}]})
@@ -216,7 +225,7 @@ class TestPtcHostToolCalling:
         agent = _agent(
             _eval_call(code),
             _done(),
-            middleware=MontyCodeInterpreterMiddleware(ptc=["add_one"]),
+            middleware=MontyCodeInterpreterMiddleware(ptc=[add_one]),
             tools=[add_one],
         )
         result = agent.invoke({"messages": [{"role": "user", "content": "go"}]})
@@ -333,7 +342,7 @@ class TestAsyncInvocation:
         agent = _agent(
             _eval_call("square(9)"),
             _done(),
-            middleware=MontyCodeInterpreterMiddleware(ptc=["square"]),
+            middleware=MontyCodeInterpreterMiddleware(ptc=[square]),
             tools=[square],
         )
         result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})

@@ -54,5 +54,12 @@ class EvalPythonResult(BaseModel):
         default=None,
         description="Structured error payload, or ``None`` on success.",
     )
+    attempted_code: str | None = Field(
+        default=None,
+        description=(
+            "The code that was submitted when the error occurred. "
+            "Populated only when ``error`` is set, to aid debugging."
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)

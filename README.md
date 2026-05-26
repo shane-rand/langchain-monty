@@ -32,7 +32,7 @@ The middleware adds an `eval_python` tool to the agent and appends a usage guide
 
 ## Programmatic tool calling (ptc)
 
-By default the interpreter is pure-compute: it has no access to host tools. Pass `ptc=` with a list of tool names to expose those tools inside the sandbox:
+By default the interpreter is pure-compute: it has no access to host tools. Pass `ptc=` with a list of `BaseTool` objects to expose those tools inside the sandbox:
 
 ```python
 from langchain_core.tools import tool
@@ -40,14 +40,20 @@ from deepagents import create_deep_agent
 from langchain_monty import MontyCodeInterpreterMiddleware
 
 @tool
-def search(query: str) -> list[dict]:
-    """Search the web."""
+async def search(query: str) -> str:
+    """Search the document index.
+
+    Returns a JSON array of results. Each result is a dict with:
+      - title (str): document title
+      - url (str): source URL
+      - snippet (str): matching excerpt
+    """
     ...
 
 agent = create_deep_agent(
     model="anthropic:claude-sonnet-4-6",
     tools=[search],
-    middleware=[MontyCodeInterpreterMiddleware(ptc=["search"])],
+    middleware=[MontyCodeInterpreterMiddleware(ptc=[search])],
 )
 ```
 
@@ -59,6 +65,107 @@ results = search("LangGraph 0.6 release notes")
 ```
 
 Each host-tool call surfaces on the Python side as a `FunctionSnapshot`. The middleware drives an event loop — invoking the LangChain tool through its normal machinery (so `HumanInTheLoopMiddleware`, retries, traces, and `Command`-returning tools all keep working), then resuming Monty with the result. Tools not in the allowlist return an error to the interpreter rather than executing.
+
+## Building tools for the sandbox
+
+Monty has no type introspection and the LLM writes code before it has seen any data. The **only** signal it has about what a host function returns is the tool's docstring, which the middleware surfaces verbatim in both the system prompt and the `eval_python` tool description. Following these conventions keeps generated code correct on the first attempt.
+
+### 1. Document the return shape precisely
+
+Name every field, give its type, and note optional or nullable fields. Vague descriptions produce hallucinated field names and silent empty results.
+
+```python
+# Bad — the LLM will guess field names and get them wrong
+@tool
+async def get_compensation_history() -> str:
+    """Retrieve salary history records."""
+    ...
+
+# Good — the LLM knows exactly what to expect
+@tool
+async def get_compensation_history() -> str:
+    """
+    Retrieve salary change history for all employees.
+
+    Returns a JSON array. Each record contains:
+      - employee_id (str): matches employee_id in the roster
+      - effective_year (int): year the change took effect
+      - previous_salary (float): salary before the change
+      - new_salary (float): salary after the change
+      - raise_pct (float): percentage change (can be negative)
+      - rating_at_time (float | null): performance rating that drove the raise
+    """
+    ...
+```
+
+### 2. Return JSON-serializable data
+
+Return `str` (a JSON-encoded payload) or a plain Python type (`list`, `dict`, `int`, `float`, `bool`, `None`). Pydantic models, dataclasses, and other objects will be passed through `json.dumps` / `json.loads` before Monty receives them, which may lose information or raise if the object is not serializable.
+
+```python
+# Preferred — explicit JSON encoding, no surprises
+@tool
+async def get_employee_roster() -> str:
+    records = fetch_employees()
+    return json.dumps([r.model_dump() for r in records])
+```
+
+### 3. Name join keys explicitly
+
+When multiple tools return related datasets, call out the join key in every docstring. The LLM needs to know which field to use without inspecting actual data.
+
+```python
+"""...
+Join with get_compensation_history() on employee_id.
+"""
+```
+
+### 4. Document edge cases
+
+Note nulls, mixed currencies, date formats, and any filtering the tool applies (e.g. active-only). Silent nulls in generated code produce `population_n: 0` results with no error.
+
+```python
+"""...
+- currency (str): ISO 4217 code; records may mix currencies — normalize
+  before computing ratios across the full population.
+- is_active (bool): False records are included; filter with
+  `[e for e in roster if e['is_active']]` if you only want current employees.
+"""
+```
+
+### 5. Keep field names stable
+
+The LLM hard-codes field names in generated code. Renaming a field is a silent, undetectable breakage — code runs without error but produces empty or wrong results because `.get('old_name')` returns `None`.
+
+### Full example
+
+```python
+import json
+from langchain_core.tools import tool
+from langchain_monty import MontyCodeInterpreterMiddleware
+
+@tool
+async def get_employee_roster() -> str:
+    """
+    Retrieve the full employee roster.
+
+    Returns a JSON array. Each record contains:
+      - employee_id (str): unique identifier, join key for all other datasets
+      - department (str): e.g. "Engineering", "Sales"
+      - title (str): job title
+      - seniority_level (int): 0 (IC) – 3 (VP)
+      - hire_date (str): ISO 8601 date
+      - location (str): office city
+      - gender (str | null): self-reported; null if not disclosed
+      - age (int): age in years at last review cycle
+      - current_salary (float): USD annual base salary
+      - manager_id (str | null): employee_id of direct manager
+      - is_active (bool): False for departed employees
+    """
+    return json.dumps(fetch_roster())
+
+middleware = MontyCodeInterpreterMiddleware(ptc=[get_employee_roster])
+```
 
 ## Resource limits
 
@@ -81,7 +188,7 @@ middleware = MontyCodeInterpreterMiddleware(limits=limits)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ptc` | `Sequence[str] \| None` | `None` | Tool names the interpreter may call. `None` means pure-compute only. |
+| `ptc` | `Sequence[BaseTool] \| None` | `None` | Tool objects the interpreter may call. The middleware extracts names for the allowlist and stores the objects for direct invocation. `None` means pure-compute only. |
 | `limits` | `MontyLimits \| None` | `None` | Per-call resource budgets. Uses defaults when `None`. |
 | `skills_backend` | `BackendProtocol \| BackendFactory \| None` | `None` | Deepagents backend that supplies Monty-compatible Python helpers. Callables are exposed as `skill_<module>_<name>` inside the interpreter. |
 | `system_prompt` | `str \| None` | Built-in block | System-prompt block appended to every model call. Pass `None` to keep the tool but add no prompt text. |

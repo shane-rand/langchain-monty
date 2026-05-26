@@ -38,9 +38,12 @@ checkpointed alongside the rest of graph state.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
+from deepagents.backends.protocol import BackendFactory, BackendProtocol
+from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ContextT,
@@ -50,18 +53,17 @@ from langchain.agents.middleware.types import (
 )
 from langchain.tools import BaseTool, ToolRuntime
 from langchain_core.tools import StructuredTool
-from deepagents.backends.protocol import BackendFactory, BackendProtocol
-from deepagents.middleware._utils import append_to_system_message
-
 from pydantic_monty import (
-    Monty,
-    ResourceLimits,
+    CollectString,
     FunctionSnapshot,
+    FutureSnapshot,
+    Monty,
     MontyComplete,
+    NameLookupSnapshot,
+    OSAccess,
 )
 
 from langchain_monty.models import EvalError, EvalPythonResult, MontyLimits
-
 
 # --------------------------------------------------------------------------- #
 # Prompt blocks                                                               #
@@ -129,7 +131,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     """Middleware that adds an ``eval_python`` tool backed by Monty.
 
     Args:
-        ptc: *Programmatic tool calling* allowlist. Names of host tools that
+        ptc: *Programmatic tool calling* allowlist. ``BaseTool`` objects that
             interpreter code is permitted to call. Tools not in this list are
             invisible to the sandbox even if they are bound to the agent.
             Default ``None`` means pure-compute only — no host tools exposed.
@@ -155,7 +157,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
         agent = create_deep_agent(
             model="anthropic:claude-sonnet-4-6",
-            middleware=[MontyCodeInterpreterMiddleware(ptc=["task", "search"])],
+            middleware=[MontyCodeInterpreterMiddleware(ptc=[task_tool, search_tool])],
         )
         ```
     """
@@ -163,7 +165,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     def __init__(
         self,
         *,
-        ptc: Sequence[str] | None = None,
+        ptc: Sequence[BaseTool] | None = None,
         limits: MontyLimits | None = None,
         skills_backend: BackendProtocol | BackendFactory | None = None,
         system_prompt: str | None = CODE_INTERPRETER_SYSTEM_PROMPT,
@@ -172,7 +174,9 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     ) -> None:
         super().__init__()
 
-        self._ptc: frozenset[str] = frozenset(ptc or ())
+        ptc_list = list(ptc or ())
+        self._ptc: frozenset[str] = frozenset(t.name for t in ptc_list)
+        self._ptc_tools: dict[str, BaseTool] = {t.name: t for t in ptc_list}
         self._limits = limits or MontyLimits()
         self._skills_backend = skills_backend
         self._iteration_budget = iteration_budget
@@ -185,12 +189,15 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         # build time substitutes the same list. Both are static across the
         # life of the middleware instance.
         if system_prompt is not None:
-            if self._ptc:
-                allowed = "\n".join(f"- {name}(...)" for name in sorted(self._ptc))
+            if self._ptc_tools:
+                schemas = "\n\n".join(
+                    _format_tool_schema(t)
+                    for t in sorted(self._ptc_tools.values(), key=lambda t: t.name)
+                )
                 self.system_prompt: str | None = (
                     system_prompt
-                    + "\n\nHost functions exposed to the interpreter:\n"
-                    + allowed
+                    + "\n\nHost functions exposed to the interpreter:\n\n"
+                    + schemas
                 )
             else:
                 self.system_prompt = (
@@ -228,13 +235,17 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         for ``tool_call_id``, ``state``, ``store``, etc.
         """
         ptc = self._ptc
+        ptc_tools = self._ptc_tools
         limits = self._limits
         iteration_budget = self._iteration_budget
         description_template = self._description_template
 
-        def _render_description(host_names: list[str]) -> str:
-            if host_names:
-                listing = "\n".join(f"- {n}(...)" for n in host_names)
+        def _render_description(tools: dict[str, BaseTool]) -> str:
+            if tools:
+                listing = "\n\n".join(
+                    _format_tool_schema(t)
+                    for t in sorted(tools.values(), key=lambda t: t.name)
+                )
             else:
                 listing = "(none — interpreter is pure-compute only)"
             return description_template.format(
@@ -247,14 +258,19 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         def _resolve_host_tools(runtime: ToolRuntime) -> dict[str, BaseTool]:
             """Pick host tools the interpreter is allowed to call.
 
-            ``ToolRuntime`` carries the bound tool set; filter to the
-            allowlist and drop ``eval_python`` itself to prevent recursive
-            invocation through the bridge.
+            Uses tool objects stored at construction time (from ``ptc``),
+            supplemented by any matching tools found on ``runtime`` that
+            weren't supplied directly. ``eval_python`` is always excluded
+            to prevent recursive invocation through the bridge.
             """
-            bound = getattr(runtime, "tools", None) or []
-            return {
-                t.name: t for t in bound if t.name in ptc and t.name != "eval_python"
+            out = {
+                name: tool for name, tool in ptc_tools.items() if name != "eval_python"
             }
+            bound = getattr(runtime, "tools", None) or []
+            for t in bound:
+                if t.name in ptc and t.name != "eval_python" and t.name not in out:
+                    out[t.name] = t
+            return out
 
         def _iteration_budget_result() -> dict[str, Any]:
             return EvalPythonResult(
@@ -267,15 +283,19 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 )
             ).model_dump()
 
-        def _exception_result(exc: BaseException) -> dict[str, Any]:
+        def _exception_result(exc: BaseException, code: str = "") -> dict[str, Any]:
             return EvalPythonResult(
                 error=EvalError(type=type(exc).__name__, message=str(exc)),
+                attempted_code=code or None,
             ).model_dump()
 
-        def _complete_result(progress: MontyComplete) -> dict[str, Any]:
+        def _complete_result(
+            progress: MontyComplete,
+            stdout: CollectString,
+        ) -> dict[str, Any]:
             return EvalPythonResult(
                 result=progress.output,
-                stdout=getattr(progress, "stdout", "") or "",
+                stdout=stdout.output or "",
             ).model_dump()
 
         def _drive_sync(
@@ -299,23 +319,57 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             errors surface inside the interpreter as exceptions the user code
             can ``try/except``.
             """
-            progress = monty.start(inputs=inputs, limits=limits.to_monty())
+            stdout = CollectString()
+            os_handler = OSAccess()
+            progress = monty.start(
+                inputs=inputs,
+                limits=limits.to_monty(),
+                print_callback=stdout,
+                os=os_handler,
+            )
             iterations = 0
-            while isinstance(progress, FunctionSnapshot):
+            while not isinstance(progress, MontyComplete):
                 iterations += 1
                 if iterations > iteration_budget:
                     return _iteration_budget_result()
+
+                if isinstance(progress, NameLookupSnapshot):
+                    # No external name providers; let Monty raise NameError.
+                    progress = progress.resume(os=os_handler)
+                    continue
+
+                if isinstance(progress, FutureSnapshot):
+                    # No async futures in the host bridge; return errors
+                    # for all pending call IDs.
+                    results = {
+                        cid: {"exception": RuntimeError("futures not supported")}
+                        for cid in progress.pending_call_ids
+                    }
+                    progress = progress.resume(results, os=os_handler)
+                    continue
+
+                assert isinstance(progress, FunctionSnapshot)
+
+                # OS calls (e.g., datetime.now, Path.exists) are handled by the
+                # os_handler and should not go through the ptc allowlist.
+                if progress.is_os_function:
+                    # This shouldn't happen when os= is passed to start(), but
+                    # handle it defensively: pass os= to resume so it auto-dispatches.
+                    progress = progress.resume_not_handled(os=os_handler)
+                    continue
 
                 name = progress.function_name
                 tool = host_tools.get(name)
                 if tool is None:
                     progress = progress.resume(
                         {
-                            "error": (
+                            "exc_type": "RuntimeError",
+                            "message": (
                                 f"host function {name!r} is not in the "
                                 f"allowlist; available: {sorted(host_tools)}"
-                            )
-                        }
+                            ),
+                        },
+                        os=os_handler,
                     )
                     continue
 
@@ -323,16 +377,17 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 try:
                     return_value = tool.invoke(
                         tool_kwargs,
-                        config={"configurable": runtime.config},
+                        config=_runtime_config(runtime),
                     )
-                    progress = progress.resume({"return_value": return_value})
+                    resume_payload = {
+                        "return_value": _deserialize_return_value(return_value)
+                    }
                 except Exception as exc:  # noqa: BLE001
-                    progress = progress.resume(
-                        {"error": f"{type(exc).__name__}: {exc}"}
-                    )
+                    resume_payload = _make_exception_result(exc)
 
-            assert isinstance(progress, MontyComplete)
-            return _complete_result(progress)
+                progress = progress.resume(resume_payload, os=os_handler)
+
+            return _complete_result(progress, stdout)
 
         async def _drive_async(
             monty: Monty,
@@ -340,23 +395,54 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             host_tools: dict[str, BaseTool],
             runtime: ToolRuntime,
         ) -> dict[str, Any]:
-            progress = monty.start(inputs=inputs, limits=limits.to_monty())
+            stdout = CollectString()
+            os_handler = OSAccess()
+            progress = monty.start(
+                inputs=inputs,
+                limits=limits.to_monty(),
+                print_callback=stdout,
+                os=os_handler,
+            )
             iterations = 0
-            while isinstance(progress, FunctionSnapshot):
+            while not isinstance(progress, MontyComplete):
                 iterations += 1
                 if iterations > iteration_budget:
                     return _iteration_budget_result()
+
+                if isinstance(progress, NameLookupSnapshot):
+                    progress = progress.resume(os=os_handler)
+                    continue
+
+                if isinstance(progress, FutureSnapshot):
+                    results = {
+                        cid: {"exception": RuntimeError("futures not supported")}
+                        for cid in progress.pending_call_ids
+                    }
+                    progress = progress.resume(results, os=os_handler)
+                    continue
+
+                assert isinstance(progress, FunctionSnapshot)
+
+                # OS calls (e.g., datetime.now, Path.exists) are handled by the
+                # os_handler and should not go through the ptc allowlist.
+                if progress.is_os_function:
+                    # This shouldn't happen when os= is passed to start(), but
+                    # handle it defensively: pass os= to resume so it auto-dispatches.
+                    progress = progress.resume_not_handled(os=os_handler)
+                    continue
 
                 name = progress.function_name
                 tool = host_tools.get(name)
                 if tool is None:
                     progress = progress.resume(
                         {
-                            "error": (
+                            "exc_type": "RuntimeError",
+                            "message": (
                                 f"host function {name!r} is not in the "
                                 f"allowlist; available: {sorted(host_tools)}"
-                            )
-                        }
+                            ),
+                        },
+                        os=os_handler,
                     )
                     continue
 
@@ -364,16 +450,17 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 try:
                     return_value = await tool.ainvoke(
                         tool_kwargs,
-                        config={"configurable": runtime.config},
+                        config=_runtime_config(runtime),
                     )
-                    progress = progress.resume({"return_value": return_value})
+                    resume_payload = {
+                        "return_value": _deserialize_return_value(return_value)
+                    }
                 except Exception as exc:  # noqa: BLE001
-                    progress = progress.resume(
-                        {"error": f"{type(exc).__name__}: {exc}"}
-                    )
+                    resume_payload = _make_exception_result(exc)
 
-            assert isinstance(progress, MontyComplete)
-            return _complete_result(progress)
+                progress = progress.resume(resume_payload, os=os_handler)
+
+            return _complete_result(progress, stdout)
 
         def eval_python(
             code: Annotated[
@@ -388,7 +475,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             try:
                 monty = Monty(code, inputs=[])
             except Exception as exc:  # noqa: BLE001 — compile/parse error
-                return _exception_result(exc)
+                return _exception_result(exc, code)
             try:
                 return _drive_sync(
                     monty,
@@ -397,7 +484,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     runtime=runtime,
                 )
             except Exception as exc:  # noqa: BLE001 — resource exhaustion
-                return _exception_result(exc)
+                return _exception_result(exc, code)
 
         async def aeval_python(
             code: Annotated[str, "Python source to execute in the Monty sandbox."],
@@ -407,7 +494,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             try:
                 monty = Monty(code, inputs=[])
             except Exception as exc:  # noqa: BLE001
-                return _exception_result(exc)
+                return _exception_result(exc, code)
             try:
                 return await _drive_async(
                     monty,
@@ -416,13 +503,13 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     runtime=runtime,
                 )
             except Exception as exc:  # noqa: BLE001
-                return _exception_result(exc)
+                return _exception_result(exc, code)
 
         return StructuredTool.from_function(
             name="eval_python",
             func=eval_python,
             coroutine=aeval_python,
-            description=_render_description(sorted(ptc)),
+            description=_render_description(ptc_tools),
         )
 
     # ---------------------------------------------------------- prompt hooks
@@ -459,6 +546,129 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 # --------------------------------------------------------------------------- #
 
 
+def _format_tool_schema(tool: BaseTool) -> str:
+    """Format a tool's name, argument signature, and description for prompts.
+
+    Produces a block like::
+
+        get_compensation_history()
+          Retrieve salary change history for all employees.
+
+          Returns ~2,000 compensation records with: employee_id,
+          effective_year, previous_salary, new_salary, raise_pct,
+          and rating_at_time.
+
+    For tools with parameters each arg is listed with its type and whether
+    it is required::
+
+        search(query: str, max_results: int = 5)
+          Search the document index.
+
+          Parameters:
+            query (str, required) — The search query.
+            max_results (int, default 5) — Number of results to return.
+    """
+    args: dict[str, Any] = getattr(tool, "args", None) or {}
+
+    # Build the call signature.
+    if args:
+        param_parts: list[str] = []
+        required: set[str] = set()
+        # JSON Schema may surface required list on the parent schema object.
+        schema = getattr(tool, "args_schema", None)
+        if schema is not None:
+            raw = getattr(schema, "model_json_schema", lambda: {})() or {}
+            required = set(raw.get("required", []))
+        for name, prop in args.items():
+            typ = prop.get("type", "any")
+            if name in required or "default" not in prop:
+                param_parts.append(f"{name}: {typ}")
+            else:
+                param_parts.append(f"{name}: {typ} = {prop['default']!r}")
+        sig = ", ".join(param_parts)
+    else:
+        sig = ""
+
+    header = f"{tool.name}({sig})"
+    lines = [header]
+
+    description = (tool.description or "").strip()
+    if description:
+        # Indent the description block under the signature.
+        indented = "\n".join(f"  {line}" for line in description.splitlines())
+        lines.append(indented)
+
+        # Append a parameter detail block when the tool has arguments.
+        if args:
+            lines.append("  Parameters:")
+            for name, prop in args.items():
+                typ = prop.get("type", "any")
+                desc = prop.get("description", "")
+                if name in required or "default" not in prop:
+                    qualifier = "required"
+                else:
+                    qualifier = f"default {prop['default']!r}"
+                entry = f"    {name} ({typ}, {qualifier})"
+                if desc:
+                    entry += f" — {desc}"
+                lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def _make_exception_result(exc: Exception) -> dict[str, Exception]:
+    """Build an ``ExternalException`` dict for ``FunctionSnapshot.resume()``.
+
+    Monty's ``resume()`` accepts ``ExternalResult``, a union of four
+    TypedDict variants.  ``ExternalExceptionData`` (the ``{"exc_type": ...,
+    "message": ...}`` form) only recognises a fixed ``ExcType`` literal —
+    framework-specific types like ``MontyRuntimeError`` or
+    ``GraphInterrupt`` are rejected with ``TypeError: Unknown exception
+    type``.
+
+    ``ExternalException`` (``{"exception": exc}``) passes the real Python
+    exception object and lets Monty map it internally, which works for
+    *any* exception class and avoids the one-shot ``resume()`` /
+    double-resume bug.
+    """
+    return {"exception": exc}
+
+
+def _runtime_config(runtime: ToolRuntime) -> dict[str, Any]:
+    """Build a ``RunnableConfig`` from ``ToolRuntime.config``.
+
+    In LangGraph production ``runtime.config`` is already a full
+    ``RunnableConfig`` (containing its own ``"configurable"`` key with
+    ``thread_id``, auth context, etc.). Wrapping it again as
+    ``{"configurable": runtime.config}`` would nest it one level too deep,
+    causing tools that read ``config["configurable"]`` to see the wrong
+    structure and silently return empty data.
+
+    We therefore pass ``runtime.config`` directly when it already looks like
+    a ``RunnableConfig``, and only wrap it when it is a bare ``configurable``
+    dict (the shape used by unit-test mocks).
+    """
+    cfg = runtime.config or {}
+    if isinstance(cfg, dict) and "configurable" in cfg:
+        return cfg
+    return {"configurable": cfg}
+
+
+def _deserialize_return_value(value: Any) -> Any:
+    """Attempt to JSON-deserialize string return values from host tools.
+
+    LangChain tools typically return JSON-serialized strings. Monty needs
+    native Python objects (lists, dicts) so that interpreter code like
+    ``roster[0]`` indexes into a list rather than a string.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+    return value
+
+
 # Names corresponding to injected parameters on the host side. None of these
 # may ever be forwarded from interpreter-supplied kwargs/args to the
 # underlying tool — they are populated by LangChain itself.
@@ -470,17 +680,15 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 # because the interpreter writes the call site, not the LLM, and we don't
 # want an agent telling its interpreter code to pass ``tool_call_id=...``
 # as if it were a normal kwarg.
-_INJECTED_PARAM_NAMES: frozenset[str] = frozenset(
-    {
-        "runtime",  # ToolRuntime
-        "state",  # InjectedState (legacy)
-        "store",  # InjectedStore
-        "tool_call_id",  # InjectedToolCallId
-        "config",  # RunnableConfig injection
-        "context",  # langgraph Context (legacy)
-        "stream_writer",  # injected from ToolRuntime
-    }
-)
+_INJECTED_PARAM_NAMES: frozenset[str] = frozenset({
+    "runtime",  # ToolRuntime
+    "state",  # InjectedState (legacy)
+    "store",  # InjectedStore
+    "tool_call_id",  # InjectedToolCallId
+    "config",  # RunnableConfig injection
+    "context",  # langgraph Context (legacy)
+    "stream_writer",  # injected from ToolRuntime
+})
 
 
 def _visible_schema_fields(tool: BaseTool) -> list[str]:
@@ -513,8 +721,8 @@ def _normalize_call_args(snapshot: FunctionSnapshot, tool: BaseTool) -> dict[str
     3. Merge keyword args last, with kwargs winning on conflict (a conflict
        would itself indicate an interpreter-side bug).
     """
-    args = getattr(snapshot, "args", ()) or ()
-    raw_kwargs = dict(getattr(snapshot, "kwargs", {}) or {})
+    args = snapshot.args or ()
+    raw_kwargs = dict(snapshot.kwargs or {})
 
     # (1) Drop any injected names from interpreter-supplied kwargs.
     kwargs = {k: v for k, v in raw_kwargs.items() if k not in _INJECTED_PARAM_NAMES}
