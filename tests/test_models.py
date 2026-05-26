@@ -41,16 +41,27 @@ class TestEvalPythonResult:
     def test_model_dump_shape(self):
         r = EvalPythonResult(result="val", stdout="out")
         d = r.model_dump()
-        assert set(d.keys()) == {"result", "stdout", "error"}
+        assert set(d.keys()) == {"result", "stdout", "error", "attempted_code"}
         assert d["result"] == "val"
         assert d["stdout"] == "out"
         assert d["error"] is None
+        assert d["attempted_code"] is None
 
     def test_error_nested_in_dump(self):
         err = EvalError(type="E", message="m")
         r = EvalPythonResult(error=err)
         d = r.model_dump()
         assert d["error"] == {"type": "E", "message": "m"}
+
+    def test_with_attempted_code(self):
+        err = EvalError(type="SyntaxError", message="oops")
+        r = EvalPythonResult(error=err, attempted_code="bad code")
+        d = r.model_dump()
+        assert d["attempted_code"] == "bad code"
+
+    def test_attempted_code_none_on_success(self):
+        r = EvalPythonResult(result=42)
+        assert r.attempted_code is None
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValidationError):
