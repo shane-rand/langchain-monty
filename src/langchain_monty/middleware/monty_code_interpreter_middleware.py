@@ -131,10 +131,21 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     """Middleware that adds an ``eval_python`` tool backed by Monty.
 
     Args:
-        ptc: *Programmatic tool calling* allowlist. ``BaseTool`` objects that
-            interpreter code is permitted to call. Tools not in this list are
-            invisible to the sandbox even if they are bound to the agent.
-            Default ``None`` means pure-compute only — no host tools exposed.
+        ptc: *Programmatic tool calling* allowlist. Each entry is either a
+            ``BaseTool`` instance or a ``str`` tool name.
+
+            ``BaseTool`` entries are available immediately — their schemas
+            appear in the system prompt and tool description.
+
+            ``str`` entries are *deferred*: they register the name in the
+            allowlist and are resolved at runtime from ``runtime.tools``.
+            This is useful for tools injected by other middleware (e.g.
+            ``FilesystemMiddleware`` contributes ``ls``, ``read_file``,
+            ``write_file``, ``edit_file``, ``glob``, ``grep``).
+
+            Tools not in this list are invisible to the sandbox even if they
+            are bound to the agent. Default ``None`` means pure-compute
+            only — no host tools exposed.
         limits: ``MontyLimits`` controlling per-call resource budgets.
         skills_backend: Optional deepagents backend that supplies importable
             Monty-compatible Python helpers. When set, the middleware reads
@@ -155,9 +166,21 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         from deepagents import create_deep_agent
         from langchain_monty import MontyCodeInterpreterMiddleware
 
+        # BaseTool instances — schemas shown in prompt
         agent = create_deep_agent(
             model="anthropic:claude-sonnet-4-6",
             middleware=[MontyCodeInterpreterMiddleware(ptc=[task_tool, search_tool])],
+        )
+
+        # Mix of BaseTool and str — str names resolved at runtime from
+        # tools injected by other middleware (e.g. FilesystemMiddleware)
+        agent = create_deep_agent(
+            model="anthropic:claude-sonnet-4-6",
+            middleware=[
+                MontyCodeInterpreterMiddleware(
+                    ptc=[my_api_tool, "read_file", "ls", "grep"],
+                ),
+            ],
         )
         ```
     """
@@ -165,7 +188,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     def __init__(
         self,
         *,
-        ptc: Sequence[BaseTool] | None = None,
+        ptc: Sequence[BaseTool | str] | None = None,
         limits: MontyLimits | None = None,
         skills_backend: BackendProtocol | BackendFactory | None = None,
         system_prompt: str | None = CODE_INTERPRETER_SYSTEM_PROMPT,
@@ -174,9 +197,21 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     ) -> None:
         super().__init__()
 
-        ptc_list = list(ptc or ())
-        self._ptc: frozenset[str] = frozenset(t.name for t in ptc_list)
-        self._ptc_tools: dict[str, BaseTool] = {t.name: t for t in ptc_list}
+        # Partition ptc entries into BaseTool instances (immediate) and str
+        # names (deferred — resolved at runtime from runtime.tools).
+        tool_entries: list[BaseTool] = []
+        deferred_names: list[str] = []
+        for entry in ptc or ():
+            if isinstance(entry, str):
+                deferred_names.append(entry)
+            else:
+                tool_entries.append(entry)
+
+        self._ptc: frozenset[str] = frozenset(
+            [t.name for t in tool_entries] + deferred_names
+        )
+        self._ptc_tools: dict[str, BaseTool] = {t.name: t for t in tool_entries}
+        self._deferred_names: frozenset[str] = frozenset(deferred_names)
         self._limits = limits or MontyLimits()
         self._skills_backend = skills_backend
         self._iteration_budget = iteration_budget
@@ -189,27 +224,36 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         # build time substitutes the same list. Both are static across the
         # life of the middleware instance.
         if system_prompt is not None:
+            prompt_parts: list[str] = [system_prompt]
             if self._ptc_tools:
                 schemas = "\n\n".join(
                     _format_tool_schema(t)
                     for t in sorted(self._ptc_tools.values(), key=lambda t: t.name)
                 )
-                self.system_prompt: str | None = (
-                    system_prompt
-                    + "\n\nHost functions exposed to the interpreter:\n\n"
-                    + schemas
+                prompt_parts.append(
+                    "\n\nHost functions exposed to the interpreter:\n\n" + schemas
                 )
-            else:
-                self.system_prompt = (
-                    system_prompt
-                    + "\n\nNo host functions are exposed; the interpreter is "
+            if self._deferred_names:
+                names_list = ", ".join(f"``{n}``" for n in sorted(self._deferred_names))
+                prompt_parts.append(
+                    "\n\nAdditional host functions available at runtime "
+                    "(injected by other middleware): "
+                    + names_list
+                    + ".\nCall these the same way as other host functions. "
+                    "Their return values are Python objects (dicts/lists), "
+                    "not JSON strings."
+                )
+            if not self._ptc_tools and not self._deferred_names:
+                prompt_parts.append(
+                    "\n\nNo host functions are exposed; the interpreter is "
                     "pure compute only."
                 )
+            self.system_prompt: str | None = "".join(prompt_parts)
         else:
             self.system_prompt = None
 
         self._tool = self._build_eval_python_tool()
-        self.tools: list[BaseTool] = [self._tool]
+        self.tools: Sequence[BaseTool] = [self._tool]
 
     # --------------------------------------------------------------- tool
 
@@ -236,18 +280,30 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         """
         ptc = self._ptc
         ptc_tools = self._ptc_tools
+        deferred_names = self._deferred_names
         limits = self._limits
         iteration_budget = self._iteration_budget
         description_template = self._description_template
 
         def _render_description(tools: dict[str, BaseTool]) -> str:
+            parts: list[str] = []
             if tools:
-                listing = "\n\n".join(
-                    _format_tool_schema(t)
-                    for t in sorted(tools.values(), key=lambda t: t.name)
+                parts.append(
+                    "\n\n".join(
+                        _format_tool_schema(t)
+                        for t in sorted(tools.values(), key=lambda t: t.name)
+                    )
                 )
-            else:
+            if deferred_names:
+                names = ", ".join(sorted(deferred_names))
+                parts.append(
+                    f"Runtime-resolved host functions (injected by other "
+                    f"middleware): {names}"
+                )
+            if not parts:
                 listing = "(none — interpreter is pure-compute only)"
+            else:
+                listing = "\n\n".join(parts)
             return description_template.format(
                 available_host_tools=listing,
                 max_duration_secs=limits.max_duration_secs,
