@@ -32,7 +32,7 @@ The middleware adds an `eval_python` tool to the agent and appends a usage guide
 
 ## Programmatic tool calling (ptc)
 
-By default the interpreter is pure-compute: it has no access to host tools. Pass `ptc=` with a list of `BaseTool` objects to expose those tools inside the sandbox:
+By default the interpreter is pure-compute: it has no access to host tools. Pass `ptc=` with a list of `BaseTool` objects and/or `str` tool names to expose those tools inside the sandbox:
 
 ```python
 from langchain_core.tools import tool
@@ -56,6 +56,23 @@ agent = create_deep_agent(
     middleware=[MontyCodeInterpreterMiddleware(ptc=[search])],
 )
 ```
+
+### Deferred tool names
+
+`ptc` entries can also be plain strings. String entries register the name in the allowlist but are resolved at runtime from `runtime.tools` — useful for tools injected by other middleware (e.g. `FilesystemMiddleware` contributes `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`):
+
+```python
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-4-6",
+    middleware=[
+        MontyCodeInterpreterMiddleware(
+            ptc=[my_api_tool, "read_file", "ls", "grep"],
+        ),
+    ],
+)
+```
+
+`BaseTool` entries have their schemas shown in the system prompt immediately. `str` entries are noted as runtime-resolved and their schemas are rendered when they are resolved from the runtime.
 
 Inside the sandbox, the agent can now write:
 
@@ -188,7 +205,7 @@ middleware = MontyCodeInterpreterMiddleware(limits=limits)
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ptc` | `Sequence[BaseTool] \| None` | `None` | Tool objects the interpreter may call. The middleware extracts names for the allowlist and stores the objects for direct invocation. `None` means pure-compute only. |
+| `ptc` | `Sequence[BaseTool \| str] \| None` | `None` | Tools the interpreter may call. `BaseTool` entries are available immediately — their schemas appear in the system prompt. `str` entries are deferred: the name is registered in the allowlist and resolved at runtime from `runtime.tools` (useful for tools injected by other middleware). `None` means pure-compute only. |
 | `limits` | `MontyLimits \| None` | `None` | Per-call resource budgets. Uses defaults when `None`. |
 | `skills_backend` | `BackendProtocol \| BackendFactory \| None` | `None` | Deepagents backend that supplies Monty-compatible Python helpers. Callables are exposed as `skill_<module>_<name>` inside the interpreter. |
 | `system_prompt` | `str \| None` | Built-in block | System-prompt block appended to every model call. Pass `None` to keep the tool but add no prompt text. |
@@ -216,9 +233,12 @@ On failure:
   "error": {
     "type": "ZeroDivisionError",
     "message": "division by zero"
-  }
+  },
+  "attempted_code": "1 / 0"
 }
 ```
+
+The `attempted_code` field is populated only when `error` is set, to aid debugging.
 
 Three error classes the agent can act on differently:
 
@@ -238,7 +258,7 @@ The sandbox has no access to the host filesystem, network, subprocesses, or envi
 
 ## Async support
 
-The middleware exposes both sync (`eval_python`) and async (`aeval_python`) variants. Use `agent.ainvoke(...)` to run the async path end-to-end:
+The tool is always called `eval_python`. Internally the middleware registers both a sync and an async implementation; LangChain dispatches to the async path automatically when you use `agent.ainvoke(...)`:
 
 ```python
 result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
