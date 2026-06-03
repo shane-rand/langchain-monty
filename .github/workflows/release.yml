@@ -26,6 +26,8 @@ jobs:
           python-version: "3.12"
 
       - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
 
       - name: Run semantic release
         id: release
