@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.1.1 (2026-06-03)
+
+### Bug Fixes
+
+- Bogus commit to trigger full pipeline
+  ([`bc5227e`](https://github.com/shane-rand/langchain-monty/commit/bc5227ec97bd3b4bcbae5fb82af44f57ce06c489))
+
+### Continuous Integration
+
+- Fixing build commands
+  ([`df60028`](https://github.com/shane-rand/langchain-monty/commit/df600282153721d91661cd98f53d0ec40c3af7ad))
+
+- Fixing build commands
+  ([`a2b2bb7`](https://github.com/shane-rand/langchain-monty/commit/a2b2bb7e7d6ad5e38d72ed88cbca4001f2096c75))
+
+
 ## v0.1.0 (2026-06-03)
 
 ### Bug Fixes
