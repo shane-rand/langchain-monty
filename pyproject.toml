@@ -26,6 +26,13 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+build_command = "uv build --frozen"
+
+[tool.semantic_release.publish]
+upload_to_vcs_release = true
+
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
