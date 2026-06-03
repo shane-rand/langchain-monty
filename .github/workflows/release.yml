@@ -25,6 +25,8 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: astral-sh/setup-uv@v4
+
       - name: Run semantic release
         id: release
         uses: python-semantic-release/python-semantic-release@v9
@@ -33,4 +35,4 @@ jobs:
 
       - name: Publish to PyPI
         if: steps.release.outputs.released == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        run: uv publish --trusted-publishing always
