@@ -10,7 +10,7 @@ This is the Python analog of `langchain-quickjs`, which does the same thing with
 ## Installation
 
 ```bash
-pip install langchain-monty
+uv add langchain-monty
 ```
 
 Requires Python 3.12+.
