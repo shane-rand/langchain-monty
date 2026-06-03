@@ -35,7 +35,8 @@ jobs:
 
       - name: Build distributions
         if: steps.release.outputs.released == 'true'
-        run: uv build --frozen
+        run: uv sync --frozen |
+          uv build
 
       - name: Publish to PyPI
         if: steps.release.outputs.released == 'true'
