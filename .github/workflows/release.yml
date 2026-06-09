@@ -29,9 +29,17 @@ jobs:
 
       - name: Run semantic release
         id: release
-        uses: python-semantic-release/python-semantic-release@v9
-        with:
-          github_token: ${{ secrets.RELEASE_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          uv tool install python-semantic-release
+          NEXT_VERSION=$(semantic-release version --print 2>/dev/null)
+          if [ -n "$NEXT_VERSION" ]; then
+            semantic-release version
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build distributions
         if: steps.release.outputs.released == 'true'
