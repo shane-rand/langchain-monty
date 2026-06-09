@@ -238,6 +238,7 @@ class TestEvalPythonSync:
 
         snap = MagicMock(spec=FunctionSnapshot)
         snap.function_name = "forbidden_tool"
+        snap.is_os_function = False
         snap.args = ()
         snap.kwargs = {}
 
@@ -312,6 +313,7 @@ class TestEvalPythonSync:
 
         snap = MagicMock(spec=FunctionSnapshot)
         snap.function_name = "search"
+        snap.is_os_function = False
         snap.args = ()
         snap.kwargs = {"query": "test"}
 
@@ -351,6 +353,7 @@ class TestEvalPythonSync:
 
         snap = MagicMock(spec=FunctionSnapshot)
         snap.function_name = "search"
+        snap.is_os_function = False
         snap.args = ()
         snap.kwargs = {"query": "bad"}
 
@@ -461,6 +464,7 @@ class TestEvalPythonSync:
 
         snap = MagicMock(spec=FunctionSnapshot)
         snap.function_name = "search"
+        snap.is_os_function = False
         snap.args = ()
         snap.kwargs = {"query": "test"}
 
@@ -551,3 +555,237 @@ class TestEvalPythonAsync:
 
         assert result["result"] == "done"
         assert result["error"] is None
+
+
+# --------------------------------------------------------------------------- #
+# eval_python tool -- async driver: FutureSnapshot / gather path              #
+# --------------------------------------------------------------------------- #
+
+
+class TestEvalPythonAsyncGather:
+    """Tests for the deferred-FunctionSnapshot + concurrent-FutureSnapshot path.
+
+    The async driver defers each host-tool call (FunctionSnapshot → resume with
+    {"future": call_id}) and then resolves the whole batch concurrently when
+    Monty emits a FutureSnapshot.
+    """
+
+    async def _invoke(self, middleware, code, runtime):
+        return await middleware._tool.coroutine(code=code, runtime=runtime)
+
+    def _make_function_snap(self, name, call_id, kwargs=None):
+        from pydantic_monty import FunctionSnapshot
+
+        snap = MagicMock(spec=FunctionSnapshot)
+        snap.function_name = name
+        snap.call_id = call_id
+        snap.is_os_function = False
+        snap.args = ()
+        snap.kwargs = kwargs or {}
+        return snap
+
+    @pytest.mark.asyncio
+    async def test_function_snapshot_resumes_with_future_payload(self):
+        """FunctionSnapshot must resume with {"future": call_id}, not {"return_value": ...}."""
+        from pydantic_monty import CollectString, FutureSnapshot, MontyComplete
+
+        search = _make_base_tool("search", args={"query": {}})
+        search.ainvoke = AsyncMock(return_value="r")
+        m = MontyCodeInterpreterMiddleware(ptc=[search])
+        runtime = _make_runtime()
+
+        snap = self._make_function_snap("search", call_id=7, kwargs={"query": "hi"})
+        future_snap = MagicMock(spec=FutureSnapshot)
+        future_snap.pending_call_ids = [7]
+        real_complete = MagicMock(spec=MontyComplete)
+        real_complete.output = None
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+
+        snap.resume.return_value = future_snap
+        future_snap.resume.return_value = real_complete
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap
+            await self._invoke(m, "search(query='hi')", runtime)
+
+        snap.resume.assert_called_once()
+        call_payload = snap.resume.call_args[0][0]
+        assert "future" in call_payload
+        assert call_payload["future"] == 7
+        assert "return_value" not in call_payload
+
+    @pytest.mark.asyncio
+    async def test_future_snapshot_invokes_all_tools_and_passes_results(self):
+        """All deferred calls must be awaited and their results forwarded in the FutureSnapshot resume."""
+        from pydantic_monty import CollectString, FutureSnapshot, MontyComplete
+
+        search = _make_base_tool("search", args={"query": {}})
+        fetch = _make_base_tool("fetch", args={"url": {}})
+        search.ainvoke = AsyncMock(return_value='["hit"]')
+        fetch.ainvoke = AsyncMock(return_value='{"ok": true}')
+        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch])
+        runtime = _make_runtime()
+
+        snap_a = self._make_function_snap("search", call_id=1, kwargs={"query": "q"})
+        snap_b = self._make_function_snap("fetch", call_id=2, kwargs={"url": "u"})
+        future_snap = MagicMock(spec=FutureSnapshot)
+        future_snap.pending_call_ids = [1, 2]
+        real_complete = MagicMock(spec=MontyComplete)
+        real_complete.output = "done"
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+
+        snap_a.resume.return_value = snap_b
+        snap_b.resume.return_value = future_snap
+        future_snap.resume.return_value = real_complete
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap_a
+            result = await self._invoke(m, "...", runtime)
+
+        search.ainvoke.assert_awaited_once()
+        fetch.ainvoke.assert_awaited_once()
+
+        future_snap.resume.assert_called_once()
+        results_arg = future_snap.resume.call_args[0][0]
+        assert 1 in results_arg and 2 in results_arg
+        assert "return_value" in results_arg[1]
+        assert "return_value" in results_arg[2]
+        assert result["error"] is None
+        assert result["result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_future_snapshot_batch_counts_as_one_iteration(self):
+        """N deferred calls resolved in one FutureSnapshot consume 1 iteration, not N."""
+        from pydantic_monty import CollectString, FutureSnapshot, MontyComplete
+
+        search = _make_base_tool("search", args={"query": {}})
+        fetch = _make_base_tool("fetch", args={"url": {}})
+        search.ainvoke = AsyncMock(return_value="r1")
+        fetch.ainvoke = AsyncMock(return_value="r2")
+
+        # Budget of 1: two deferred calls in a single FutureSnapshot should fit.
+        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch], iteration_budget=1)
+        runtime = _make_runtime()
+
+        snap_a = self._make_function_snap("search", call_id=1, kwargs={"query": "q"})
+        snap_b = self._make_function_snap("fetch", call_id=2, kwargs={"url": "u"})
+        future_snap = MagicMock(spec=FutureSnapshot)
+        future_snap.pending_call_ids = [1, 2]
+        real_complete = MagicMock(spec=MontyComplete)
+        real_complete.output = "done"
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+
+        snap_a.resume.return_value = snap_b
+        snap_b.resume.return_value = future_snap
+        future_snap.resume.return_value = real_complete
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap_a
+            result = await self._invoke(m, "...", runtime)
+
+        assert result["error"] is None
+        assert result["result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_future_snapshot_tool_error_surfaced_per_call(self):
+        """A failing tool in the batch gets an exception payload; the other call is unaffected."""
+        from pydantic_monty import CollectString, FutureSnapshot, MontyComplete
+
+        search = _make_base_tool("search", args={"query": {}})
+        fetch = _make_base_tool("fetch", args={"url": {}})
+        search.ainvoke = AsyncMock(side_effect=RuntimeError("search down"))
+        fetch.ainvoke = AsyncMock(return_value='{"ok": true}')
+        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch])
+        runtime = _make_runtime()
+
+        snap_a = self._make_function_snap("search", call_id=1, kwargs={"query": "q"})
+        snap_b = self._make_function_snap("fetch", call_id=2, kwargs={"url": "u"})
+        future_snap = MagicMock(spec=FutureSnapshot)
+        future_snap.pending_call_ids = [1, 2]
+        real_complete = MagicMock(spec=MontyComplete)
+        real_complete.output = None
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+
+        snap_a.resume.return_value = snap_b
+        snap_b.resume.return_value = future_snap
+        future_snap.resume.return_value = real_complete
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap_a
+            await self._invoke(m, "...", runtime)
+
+        future_snap.resume.assert_called_once()
+        results_arg = future_snap.resume.call_args[0][0]
+        assert "exception" in results_arg[1]
+        assert isinstance(results_arg[1]["exception"], RuntimeError)
+        assert "return_value" in results_arg[2]
+
+    @pytest.mark.asyncio
+    async def test_function_snapshot_not_in_allowlist_resumes_with_error_not_future(self):
+        """A call to a tool not in the allowlist should get an immediate error, not a future deferral."""
+        from pydantic_monty import CollectString, MontyComplete
+
+        search = _make_base_tool("search", args={"query": {}})
+        m = MontyCodeInterpreterMiddleware(ptc=[search])
+        runtime = _make_runtime()
+
+        snap = self._make_function_snap("forbidden", call_id=99, kwargs={})
+        real_complete = MagicMock(spec=MontyComplete)
+        real_complete.output = None
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+        snap.resume.return_value = real_complete
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap
+            await self._invoke(m, "forbidden()", runtime)
+
+        snap.resume.assert_called_once()
+        call_payload = snap.resume.call_args[0][0]
+        assert "future" not in call_payload
+        assert call_payload.get("exc_type") == "RuntimeError"
+        assert "allowlist" in call_payload["message"]

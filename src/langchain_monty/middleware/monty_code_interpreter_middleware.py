@@ -1,24 +1,7 @@
 """Middleware exposing a sandboxed Python interpreter (pydantic-monty) to a deep agent.
 
-This is the Python analog of ``langchain_quickjs.MontyCodeInterpreterMiddleware``.
-QuickJS embeds a tiny JS VM; ``pydantic-monty`` is a tiny Python-subset VM
-written in Rust by Pydantic (will back code-mode in Pydantic AI). Both are
-in-process, microsecond-startup interpreters that completely isolate
-agent-written code from the host except through explicitly-injected
-external functions.
-
-The mapping from QuickJS-world to Monty-world:
-
-==============================  ============================================
-``langchain-quickjs``           ``langchain-monty``
-------------------------------  --------------------------------------------
-QuickJS engine                  ``pydantic_monty.Monty``
-``eval`` tool exposed to agent  ``eval_python`` tool exposed to agent
-``ptc=[...]`` allowlist         ``ptc=[...]`` allowlist
-host-runtime bridge (C↔JS)      ``start()`` / ``resume(FunctionSnapshot)``
-``skills_backend=...``          ``skills_backend=...``
-scoped JS globals               ``inputs=[...]`` + curated env
-==============================  ============================================
+``pydantic-monty`` is a tiny Python-subset VM
+written in Rust by Pydantic (will back code-mode in Pydantic AI).
 
 Design follows ``deepagents.middleware.subagents.SubAgentMiddleware``:
 ``AgentMiddleware`` subclass that contributes a single tool and appends an
@@ -26,8 +9,7 @@ instruction block to the system prompt via ``wrap_model_call`` /
 ``awrap_model_call``. No mutable instance state — everything per-call flows
 through ``ToolRuntime``.
 
-The interesting bit, and the reason Monty is a strictly better fit than the
-QuickJS analog the obvious way: every call from interpreter code into a host
+Every call from interpreter code into a host
 tool surfaces on the host as a ``FunctionSnapshot``. We can drive it like an
 event loop — invoke the LangChain tool through its normal machinery (so
 ``HumanInTheLoopMiddleware``, retries, traces, and ``Command``-returning
@@ -38,6 +20,7 @@ checkpointed alongside the rest of graph state.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
@@ -55,6 +38,7 @@ from langchain.tools import BaseTool, ToolRuntime
 from langchain_core.tools import StructuredTool
 from pydantic_monty import (
     CollectString,
+    ExternalResult,
     FunctionSnapshot,
     FutureSnapshot,
     Monty,
@@ -404,8 +388,6 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     progress = progress.resume(results, os=os_handler)
                     continue
 
-                assert isinstance(progress, FunctionSnapshot)
-
                 # OS calls (e.g., datetime.now, Path.exists) are handled by the
                 # os_handler and should not go through the ptc allowlist.
                 if progress.is_os_function:
@@ -460,64 +442,73 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 os=os_handler,
             )
             iterations = 0
+            deferred: dict[int, tuple[BaseTool, dict]] = {}
+            
+            #Small Async wrapper to get call_id back with the Tool Result
+            async def _ainvoke_wrap(call_id: int, tool: BaseTool, kwargs: dict) -> Any:
+                try:
+                    return (call_id, _make_return_value_result(await tool.ainvoke(kwargs, config=_runtime_config(runtime))))
+                except Exception as exc:  # noqa: BLE001
+                    return (call_id, _make_exception_result(exc))
+                
             while not isinstance(progress, MontyComplete):
-                iterations += 1
                 if iterations > iteration_budget:
                     return _iteration_budget_result()
 
                 if isinstance(progress, NameLookupSnapshot):
+                    iterations += 1
                     progress = progress.resume(os=os_handler)
                     continue
 
                 if isinstance(progress, FutureSnapshot):
-                    results = {
-                        cid: {"exception": RuntimeError("futures not supported")}
-                        for cid in progress.pending_call_ids
-                    }
+                    
+                    results: dict[int, ExternalResult] = {}
+                    try:
+                        tool_tasks = [_ainvoke_wrap(call_id, deferred[call_id][0], deferred[call_id][1]) for call_id in progress.pending_call_ids if call_id in deferred]
+                        tool_calls: list[tuple[int, Any]] = await asyncio.gather(*tool_tasks)
+                        
+                        for call_id,tool_call_or_exception in tool_calls:
+                            results[call_id] = tool_call_or_exception
+                            deferred.pop(call_id, None)
+                    except Exception as exc:  # noqa: BLE001
+                        results[0] = _make_exception_result(exc)
+                    
+                    iterations += 1
                     progress = progress.resume(results, os=os_handler)
                     continue
 
-                assert isinstance(progress, FunctionSnapshot)
-
-                # OS calls (e.g., datetime.now, Path.exists) are handled by the
-                # os_handler and should not go through the ptc allowlist.
-                if progress.is_os_function:
+                if isinstance(progress, FunctionSnapshot):
+                    # OS calls (e.g., datetime.now, Path.exists) are handled by the
+                    # os_handler and should not go through the ptc allowlist.
+                    if progress.is_os_function:
+                        
                     # This shouldn't happen when os= is passed to start(), but
                     # handle it defensively: pass os= to resume so it auto-dispatches.
-                    progress = progress.resume_not_handled(os=os_handler)
-                    continue
-
-                name = progress.function_name
-                tool = host_tools.get(name)
-                if tool is None:
-                    progress = progress.resume(
-                        {
-                            "exc_type": "RuntimeError",
-                            "message": (
-                                f"host function {name!r} is not in the "
-                                f"allowlist; available: {sorted(host_tools)}"
-                            ),
-                        },
-                        os=os_handler,
-                    )
-                    continue
-
-                tool_kwargs = _normalize_call_args(progress, tool)
-                try:
-                    return_value = await tool.ainvoke(
-                        tool_kwargs,
-                        config=_runtime_config(runtime),
-                    )
-                    resume_payload = {
-                        "return_value": _deserialize_return_value(return_value)
-                    }
-                except Exception as exc:  # noqa: BLE001
-                    resume_payload = _make_exception_result(exc)
-
-                progress = progress.resume(resume_payload, os=os_handler)
-
+                        progress = progress.resume_not_handled(os=os_handler)
+                        continue
+                    
+                    name = progress.function_name
+                    tool = host_tools.get(name)
+                    if tool is not None:
+                        deferred[progress.call_id] = (tool, _normalize_call_args(progress, tool))
+                        progress = progress.resume({"future": progress.call_id}, os=os_handler)
+                        continue
+                    else:
+                        progress = progress.resume(
+                            {
+                                "exc_type": "RuntimeError",
+                                "message": (
+                                    f"host function {name!r} is not in the "
+                                    f"allowlist; available: {sorted(host_tools)}"
+                                ),
+                            },
+                            os=os_handler,
+                        )
+                continue
             return _complete_result(progress, stdout)
 
+
+        
         def eval_python(
             code: Annotated[
                 str,
@@ -671,6 +662,19 @@ def _format_tool_schema(tool: BaseTool) -> str:
 
     return "\n".join(lines)
 
+def _make_return_value_result(value: Any) -> dict[str, Any]:
+    """Build a successful ``ExternalResult`` dict for ``FunctionSnapshot.resume()``.
+
+    Monty's ``resume()`` accepts ``ExternalResult``, a union of four
+    TypedDict variants.  ``ReturnValueData`` (the ``{"return_value": ...}``
+    form) is the one that indicates a successful host call and lets Monty
+    unwrap the value on the interpreter side.
+
+    The other variants are for exceptions, futures, and name lookups, which
+    we don't use here but need to keep distinct from the return-value case to
+    avoid interpreter-side confusion and bugs.
+    """
+    return {"return_value": value}
 
 def _make_exception_result(exc: Exception) -> dict[str, Exception]:
     """Build an ``ExternalException`` dict for ``FunctionSnapshot.resume()``.
