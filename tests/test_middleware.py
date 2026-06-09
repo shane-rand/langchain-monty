@@ -278,6 +278,7 @@ class TestEvalPythonSync:
 
         snap = MagicMock(spec=FunctionSnapshot)
         snap.function_name = "search"
+        snap.is_os_function = False  # spec mock attrs are truthy by default
         snap.args = ("q",)
         snap.kwargs = {}
         # resume always returns the same snapshot -> infinite loop
@@ -379,11 +380,12 @@ class TestEvalPythonSync:
 
             result = self._invoke(m, "search(query='bad')", runtime)
 
-        # resume should have been called with ExternalException format
-        snap.resume.assert_called_once()
-        call_args = snap.resume.call_args[0][0]
-        assert "exception" in call_args
-        assert isinstance(call_args["exception"], ValueError)
+        # Two-pass driver: the first (deferred) resume answers with a future
+        # marker; since the mock never awaits, the driver reruns eagerly and
+        # the FINAL resume carries the ExternalException payload.
+        final_payload = snap.resume.call_args[0][0]
+        assert "exception" in final_payload
+        assert isinstance(final_payload["exception"], ValueError)
 
     def test_name_lookup_snapshot_handled(self):
         from pydantic_monty import CollectString, MontyComplete, NameLookupSnapshot
@@ -494,12 +496,16 @@ class TestEvalPythonSync:
 
             result = self._invoke(m, "search(query='test')", runtime)
 
-        # resume must be called exactly once — with the exception payload,
-        # not twice (once with return_value, once with exception).
-        snap.resume.assert_called_once()
-        call_args = snap.resume.call_args[0][0]
-        assert "exception" in call_args
-        assert isinstance(call_args["exception"], TypeError)
+        # The FINAL resume (eager pass) must carry the exception payload —
+        # the driver must not resume the same snapshot a second time with a
+        # return_value after the deserialization failure (that would be the
+        # "Progress already resumed" double-resume bug this test guards).
+        final_payload = snap.resume.call_args[0][0]
+        assert "exception" in final_payload
+        assert isinstance(final_payload["exception"], TypeError)
+        # No call in either pass may have carried a return_value.
+        for call in snap.resume.call_args_list:
+            assert "return_value" not in call[0][0]
 
 
 # --------------------------------------------------------------------------- #
@@ -508,6 +514,12 @@ class TestEvalPythonSync:
 
 
 class TestEvalPythonAsync:
+    """The async entrypoint builds the interpreter via ``Monty.acreate`` (so
+    parsing/type-checking happens off the event loop), which is why these
+    tests configure ``MockMonty.acreate`` as an AsyncMock rather than setting
+    a side effect on the class call itself.
+    """
+
     async def _invoke(self, middleware, code, runtime):
         return await middleware._tool.coroutine(code=code, runtime=runtime)
 
@@ -517,9 +529,9 @@ class TestEvalPythonAsync:
         runtime = _make_runtime()
 
         with patch(
-            "langchain_monty.middleware.monty_code_interpreter_middleware.Monty",
-            side_effect=ValueError("parse error"),
-        ):
+            "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+        ) as MockMonty:
+            MockMonty.acreate = AsyncMock(side_effect=ValueError("parse error"))
             result = await self._invoke(m, "bad code", runtime)
 
         assert result["error"]["type"] == "ValueError"
@@ -550,6 +562,7 @@ class TestEvalPythonAsync:
         ):
             instance = MockMonty.return_value
             instance.start.return_value = real_complete
+            MockMonty.acreate = AsyncMock(return_value=instance)
 
             result = await self._invoke(m, '"done"', runtime)
 
@@ -615,12 +628,16 @@ class TestEvalPythonAsyncGather:
             ),
         ):
             MockMonty.return_value.start.return_value = snap
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
             await self._invoke(m, "search(query='hi')", runtime)
 
         snap.resume.assert_called_once()
         call_payload = snap.resume.call_args[0][0]
+        # Monty's ExternalFuture TypedDict requires the literal Ellipsis as
+        # the value — the call is identified by the snapshot's call_id, not
+        # by the payload. (Resuming with the call id raises TypeError.)
         assert "future" in call_payload
-        assert call_payload["future"] == 7
+        assert call_payload["future"] is ...
         assert "return_value" not in call_payload
 
     @pytest.mark.asyncio
@@ -658,6 +675,7 @@ class TestEvalPythonAsyncGather:
             ),
         ):
             MockMonty.return_value.start.return_value = snap_a
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
             result = await self._invoke(m, "...", runtime)
 
         search.ainvoke.assert_awaited_once()
@@ -672,8 +690,13 @@ class TestEvalPythonAsyncGather:
         assert result["result"] == "done"
 
     @pytest.mark.asyncio
-    async def test_future_snapshot_batch_counts_as_one_iteration(self):
-        """N deferred calls resolved in one FutureSnapshot consume 1 iteration, not N."""
+    async def test_iteration_budget_counts_each_host_call(self):
+        """iteration_budget caps host-tool CALLS — a gather batch of N costs N.
+
+        (Earlier semantics counted a whole batch as one round-trip, which
+        let a single asyncio.gather fan out an unbounded number of host
+        calls past the budget.)
+        """
         from pydantic_monty import CollectString, FutureSnapshot, MontyComplete
 
         search = _make_base_tool("search", args={"query": {}})
@@ -681,8 +704,8 @@ class TestEvalPythonAsyncGather:
         search.ainvoke = AsyncMock(return_value="r1")
         fetch.ainvoke = AsyncMock(return_value="r2")
 
-        # Budget of 1: two deferred calls in a single FutureSnapshot should fit.
-        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch], iteration_budget=1)
+        # Budget of 2: two deferred calls fit exactly.
+        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch], iteration_budget=2)
         runtime = _make_runtime()
 
         snap_a = self._make_function_snap("search", call_id=1, kwargs={"query": "q"})
@@ -708,10 +731,46 @@ class TestEvalPythonAsyncGather:
             ),
         ):
             MockMonty.return_value.start.return_value = snap_a
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
             result = await self._invoke(m, "...", runtime)
 
         assert result["error"] is None
         assert result["result"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_iteration_budget_exceeded_by_fanout(self):
+        """A gather fan-out larger than the budget is rejected."""
+        from pydantic_monty import CollectString
+
+        search = _make_base_tool("search", args={"query": {}})
+        fetch = _make_base_tool("fetch", args={"url": {}})
+        search.ainvoke = AsyncMock(return_value="r1")
+        fetch.ainvoke = AsyncMock(return_value="r2")
+
+        # Budget of 1: the second deferred call must trip the budget.
+        m = MontyCodeInterpreterMiddleware(ptc=[search, fetch], iteration_budget=1)
+        runtime = _make_runtime()
+
+        snap_a = self._make_function_snap("search", call_id=1, kwargs={"query": "q"})
+        snap_b = self._make_function_snap("fetch", call_id=2, kwargs={"url": "u"})
+        snap_a.resume.return_value = snap_b
+        mock_stdout = MagicMock(spec=CollectString)
+        mock_stdout.output = ""
+
+        with (
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            ) as MockMonty,
+            patch(
+                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                return_value=mock_stdout,
+            ),
+        ):
+            MockMonty.return_value.start.return_value = snap_a
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
+            result = await self._invoke(m, "...", runtime)
+
+        assert result["error"]["type"] == "IterationBudgetExceeded"
 
     @pytest.mark.asyncio
     async def test_future_snapshot_tool_error_surfaced_per_call(self):
@@ -748,6 +807,7 @@ class TestEvalPythonAsyncGather:
             ),
         ):
             MockMonty.return_value.start.return_value = snap_a
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
             await self._invoke(m, "...", runtime)
 
         future_snap.resume.assert_called_once()
@@ -782,6 +842,7 @@ class TestEvalPythonAsyncGather:
             ),
         ):
             MockMonty.return_value.start.return_value = snap
+            MockMonty.acreate = AsyncMock(return_value=MockMonty.return_value)
             await self._invoke(m, "forbidden()", runtime)
 
         snap.resume.assert_called_once()

@@ -12,7 +12,21 @@ class TestEvalError:
 
     def test_model_dump(self):
         err = EvalError(type="RuntimeError", message="boom")
-        assert err.model_dump() == {"type": "RuntimeError", "message": "boom"}
+        assert err.model_dump() == {
+            "type": "RuntimeError",
+            "message": "boom",
+            "traceback": None,
+        }
+
+    def test_traceback_field(self):
+        # Monty runtime errors and type-check failures populate traceback
+        # with formatted diagnostics; default is None.
+        err = EvalError(
+            type="ZeroDivisionError",
+            message="division by zero",
+            traceback="Traceback (most recent call last):\n ...",
+        )
+        assert err.traceback.startswith("Traceback")
 
     def test_extra_fields_forbidden(self):
         with pytest.raises(ValidationError):
@@ -51,7 +65,7 @@ class TestEvalPythonResult:
         err = EvalError(type="E", message="m")
         r = EvalPythonResult(error=err)
         d = r.model_dump()
-        assert d["error"] == {"type": "E", "message": "m"}
+        assert d["error"] == {"type": "E", "message": "m", "traceback": None}
 
     def test_with_attempted_code(self):
         err = EvalError(type="SyntaxError", message="oops")
@@ -114,3 +128,19 @@ class TestMontyLimits:
         lim = MontyLimits()
         with pytest.raises(ValidationError):
             lim.max_duration_secs = 99.0  # type: ignore[misc]
+
+    def test_none_means_unlimited_and_is_omitted(self):
+        # Upstream ResourceLimits is a total=False TypedDict where an absent
+        # key means "no limit"; None fields must therefore be dropped from
+        # the dict rather than forwarded.
+        lim = MontyLimits(max_duration_secs=None, max_memory_bytes=None)
+        rl = lim.to_monty()
+        assert "max_duration_secs" not in rl
+        assert "max_memory" not in rl
+        assert rl["max_recursion_depth"] == 256  # defaults still forwarded
+
+    def test_gc_interval_default_omitted(self):
+        # gc_interval defaults to None (keep Monty's internal default) and
+        # is only forwarded when explicitly set.
+        assert "gc_interval" not in MontyLimits().to_monty()
+        assert MontyLimits(gc_interval=5000).to_monty()["gc_interval"] == 5000

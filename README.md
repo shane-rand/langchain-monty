@@ -1,10 +1,10 @@
 # langchain-monty
 
-LangChain middleware that gives a [deepagents](https://github.com/langchain-ai/deepagents) agent an `eval_python` tool backed by [pydantic-monty](https://github.com/pydantic/monty) — Pydantic's Rust-implemented, sandboxed Python interpreter.
+LangChain agent middleware that adds an `eval_python` tool backed by [pydantic-monty](https://github.com/pydantic/monty) — Pydantic's Rust-implemented, sandboxed Python interpreter.
 
 The interpreter starts in microseconds, runs in-process, and has zero access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist via the `ptc=` parameter.
 
-This is the Python analog of `langchain-quickjs`, which does the same thing with a QuickJS JavaScript VM.
+Works with any LangChain v1 agent (`langchain.agents.create_agent`) and with [deepagents](https://github.com/langchain-ai/deepagents) (`create_deep_agent`) — there is no runtime dependency on deepagents. This is the Python analog of `langchain-quickjs`, which does the same thing with a QuickJS JavaScript VM.
 
 
 ## Installation
@@ -18,10 +18,10 @@ Requires Python 3.12+.
 ## Quick start
 
 ```python
-from deepagents import create_deep_agent
+from langchain.agents import create_agent
 from langchain_monty import MontyCodeInterpreterMiddleware
 
-agent = create_deep_agent(
+agent = create_agent(
     model="anthropic:claude-sonnet-4-6",
     middleware=[MontyCodeInterpreterMiddleware()],
 )
@@ -30,6 +30,17 @@ result = agent.invoke({"messages": [{"role": "user", "content": "What is 2 ** 32
 ```
 
 The middleware adds an `eval_python` tool to the agent and appends a usage guide to the system prompt. The agent can call `eval_python` with any Python code; the result of the final expression is returned, along with any captured stdout.
+
+With deepagents, pass the middleware to `create_deep_agent` the same way:
+
+```python
+from deepagents import create_deep_agent
+
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-4-6",
+    middleware=[MontyCodeInterpreterMiddleware()],
+)
+```
 
 ## Programmatic tool calling (ptc)
 
@@ -73,7 +84,7 @@ agent = create_deep_agent(
 )
 ```
 
-`BaseTool` entries have their schemas shown in the system prompt immediately. `str` entries are noted as runtime-resolved and their schemas are rendered when they are resolved from the runtime.
+`BaseTool` entries have their schemas shown in the system prompt immediately. `str` entries are listed as runtime-resolved; on every model call the middleware checks the tools bound to the request and, once a deferred name resolves to a real tool, renders its full signature and docstring into the system prompt dynamically.
 
 Inside the sandbox, the agent can now write:
 
@@ -82,11 +93,55 @@ results = search("LangGraph 0.6 release notes")
 [r["title"] for r in results if "breaking" in r["title"].lower()]
 ```
 
-Each host-tool call surfaces on the Python side as a `FunctionSnapshot`. The middleware drives an event loop — invoking the LangChain tool through its normal machinery (so `HumanInTheLoopMiddleware`, retries, traces, and `Command`-returning tools all keep working), then resuming Monty with the result. Tools not in the allowlist return an error to the interpreter rather than executing.
+Each host-tool call surfaces on the Python side as a `FunctionSnapshot`. The middleware drives an event loop — invoking the LangChain tool through its normal machinery as a full `ToolCall` (so tracing, retries, and injected parameters all work), then resuming Monty with the result. Tools not in the allowlist return an error to the interpreter rather than executing.
+
+Tools that declare injected parameters work through the bridge: the live `ToolRuntime` (and its `state`/`store`) is forwarded into any `runtime: ToolRuntime`, `InjectedState`, or `InjectedStore` slot the tool declares, and `InjectedToolCallId` parameters receive a synthetic id prefixed `eval_python:` so bridged calls are recognizable in traces. Sandbox code can never forge these values — interpreter-supplied kwargs matching injected names are stripped before the real ones are added. The one unsupported shape is `Command`-returning tools (e.g. deepagents' `task`): a `Command` mutates graph state and can only be applied by the agent's own tool node, so calling one from inside `eval_python` raises a clear error telling the agent to call that tool directly instead.
+
+### Call styles: plain vs concurrent
+
+Host functions support two call styles inside the sandbox, and both behave identically under `invoke` and `ainvoke`:
+
+```python
+# Plain — calls resolve one at a time
+hits = search("a")
+
+# Concurrent — independent calls run in parallel (under ainvoke)
+import asyncio
+
+async def go():
+    return await asyncio.gather(search("a"), search("b"))
+
+asyncio.run(go())
+```
+
+The two styles cannot be mixed in one snippet (Monty's pause/resume protocol forces the host to answer each call as either a value or a future before knowing whether the sandbox will await it). The middleware handles this adaptively: it first runs the code in deferred mode, and if the code turns out to use plain calls it transparently restarts in eager mode — safe, because deferred mode executes no host tools until the sandbox awaits. Code that awaits some calls but discards others gets a structured `UnawaitedHostCallError` telling the agent to pick one style.
+
+### Static type checking against tool schemas
+
+Before executing anything, the submitted code is type-checked by Monty's built-in static checker against stub signatures generated from the allowlisted tools' JSON schemas. A hallucinated keyword argument, a wrong argument type, or a misspelled parameter comes back instantly as a structured `TypeCheckError` with `file:line:col` diagnostics — no execution, no wasted host-tool calls:
+
+```json
+{
+  "result": null,
+  "stdout": "",
+  "error": {
+    "type": "TypeCheckError",
+    "message": "static type check failed before execution; no code was run",
+    "traceback": "main.py:1:18: error[unknown-argument] Argument `limit` does not match any known parameter of function `search`"
+  },
+  "attempted_code": "search(query=\"x\", limit=5)"
+}
+```
+
+Disable with `MontyCodeInterpreterMiddleware(type_check=False)` if Monty's checker (a strict subset of Python's type system) rejects code you need to run. Deferred tool names that haven't resolved yet get permissive `(*args, **kwargs)` stubs, so they never fail the static check.
+
+### Human-in-the-loop and interrupts
+
+When a bridged host tool raises `GraphInterrupt` (e.g. `HumanInTheLoopMiddleware` asking for approval), the middleware re-raises it instead of feeding it into the sandbox, so LangGraph checkpoints and pauses normally. On resume, LangGraph replays the `eval_python` tool call from the top; the interrupted tool's `interrupt()` returns the recorded human answer on replay and execution proceeds. Caveat (inherent to LangGraph's replay model): host tools called *before* the interrupt point are re-invoked during the replay, so combine HITL with idempotent tools.
 
 ## Building tools for the sandbox
 
-Monty has no type introspection and the LLM writes code before it has seen any data. The **only** signal it has about what a host function returns is the tool's docstring, which the middleware surfaces verbatim in both the system prompt and the `eval_python` tool description. Following these conventions keeps generated code correct on the first attempt.
+The LLM writes code before it has seen any data. Argument names and types are enforced by the static type check, but the **only** signal the model has about what a host function *returns* is the tool's docstring, which the middleware surfaces verbatim in the system prompt. Following these conventions keeps generated code correct on the first attempt.
 
 ### 1. Document the return shape precisely
 
@@ -187,31 +242,34 @@ middleware = MontyCodeInterpreterMiddleware(ptc=[get_employee_roster])
 
 ## Resource limits
 
-Use `MontyLimits` to control per-call resource budgets:
+Use `MontyLimits` to control per-call resource budgets. Setting any field to `None` disables that limit (mirroring upstream `ResourceLimits`, where an omitted key means "no limit"):
 
 ```python
 from langchain_monty import MontyCodeInterpreterMiddleware, MontyLimits
 
 limits = MontyLimits(
-    max_duration_secs=10.0,      # wall-clock time (default 5.0)
+    max_duration_secs=10.0,       # wall-clock time (default 5.0)
     max_memory_bytes=128_000_000, # heap cap (default 64 MB)
     max_stack_depth=512,          # recursion limit (default 256)
     max_allocations=2_000_000,    # allocation count (default 1 000 000)
+    gc_interval=None,             # allocations between GCs (default: Monty's)
 )
 
 middleware = MontyCodeInterpreterMiddleware(limits=limits)
 ```
 
+Naming note: `max_memory_bytes` and `max_stack_depth` map to upstream `ResourceLimits.max_memory` and `.max_recursion_depth`; `MontyLimits.to_monty()` performs the translation.
+
 ## Constructor reference
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `ptc` | `Sequence[BaseTool \| str] \| None` | `None` | Tools the interpreter may call. `BaseTool` entries are available immediately — their schemas appear in the system prompt. `str` entries are deferred: the name is registered in the allowlist and resolved at runtime from `runtime.tools` (useful for tools injected by other middleware). `None` means pure-compute only. |
+| `ptc` | `Sequence[BaseTool \| str] \| None` | `None` | Tools the interpreter may call. `BaseTool` entries are available immediately — their schemas appear in the system prompt. `str` entries are deferred: the name is registered in the allowlist and resolved at runtime from the agent's bound tools (useful for tools injected by other middleware); their schemas are rendered into the system prompt dynamically once resolved. `None` means pure-compute only. |
 | `limits` | `MontyLimits \| None` | `None` | Per-call resource budgets. Uses defaults when `None`. |
-| `skills_backend` | `BackendProtocol \| BackendFactory \| None` | `None` | Deepagents backend that supplies Monty-compatible Python helpers. Callables are exposed as `skill_<module>_<name>` inside the interpreter. |
-| `system_prompt` | `str \| None` | Built-in block | System-prompt block appended to every model call. Pass `None` to keep the tool but add no prompt text. |
+| `system_prompt` | `str \| None` | Built-in block | System-prompt block appended to every model call. Pass `None` to keep the tool but add no prompt text — host-function schemas then move into the tool description so the model still sees them. |
 | `tool_description` | `str \| None` | Built-in template | Description rendered on the `eval_python` tool. Supports `{available_host_tools}`, `{max_duration_secs}`, `{max_memory_bytes}`, `{max_stack_depth}` placeholders. |
-| `iteration_budget` | `int` | `64` | Hard cap on host-tool round-trips per `eval_python` call. Exceeding it returns an `IterationBudgetExceeded` error. |
+| `iteration_budget` | `int` | `64` | Hard cap on host-tool **calls** per `eval_python` call (a `gather` fan-out of N counts N). Exceeding it returns an `IterationBudgetExceeded` error. |
+| `type_check` | `bool` | `True` | Statically type-check submitted code against stubs generated from the allowlisted tools' schemas before executing. Failures return a `TypeCheckError` with line-precise diagnostics. |
 
 ## Return shape
 
@@ -233,19 +291,24 @@ On failure:
   "stdout": "",
   "error": {
     "type": "ZeroDivisionError",
-    "message": "division by zero"
+    "message": "division by zero",
+    "traceback": "Traceback (most recent call last):\n  File \"main.py\", line 1, in <module>\n    1 / 0\n    ~~~\nZeroDivisionError: division by zero"
   },
   "attempted_code": "1 / 0"
 }
 ```
 
-The `attempted_code` field is populated only when `error` is set, to aid debugging.
+`error.type` is the real exception class the sandbox raised (unwrapped from Monty's wrapper), `error.traceback` carries a CPython-style traceback with line numbers and source previews when available, and `attempted_code` is populated only when `error` is set.
 
-Three error classes the agent can act on differently:
+If the final expression's value can't be expressed in plain JSON (tuples serialize as arrays, but e.g. sets and dataclasses can't), the result falls back to Monty's tagged natural form — `{"$set": [1, 2, 3]}`, `{"$dataclass": {...}, "name": "..."}` — so it always survives message serialization losslessly.
 
-- **Parse/compile errors** — syntax or unsupported-feature errors (e.g. classes). The agent should fix the code.
-- **Resource-exhaustion errors** — duration, memory, stack, or allocation limits exceeded. The agent should reduce scope.
-- **`IterationBudgetExceeded`** — the interpreter made too many host-tool calls in one invocation. The agent should restructure its code.
+Error classes the agent can act on differently:
+
+- **`SyntaxError`** — parse or unsupported-feature errors (e.g. classes). The agent should fix the code; nothing was executed.
+- **`TypeCheckError`** — the static pre-flight check failed (bad host-function arguments). Nothing was executed; `traceback` has per-line diagnostics.
+- **Runtime errors** — the real sandbox exception class (`KeyError`, `ZeroDivisionError`, ...) including resource exhaustion. The agent should fix the logic or reduce scope.
+- **`IterationBudgetExceeded`** — too many host-tool calls in one invocation. The agent should restructure its code.
+- **`UnawaitedHostCallError`** — the code mixed awaited and plain host-call styles. The agent should pick one style.
 
 ## Sandbox capabilities
 
@@ -265,17 +328,20 @@ The tool is always called `eval_python`. Internally the middleware registers bot
 result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
 ```
 
+The async path is event-loop friendly: parsing/type-checking happens via `Monty.acreate` on a worker thread, and every VM step (`start`/`resume` are blocking Rust calls) is offloaded with `asyncio.to_thread`, so a compute-heavy snippet never stalls other coroutines in your server. Sandbox code using `asyncio.gather` over host calls gets true host-side concurrency under `ainvoke` (and falls back to sequential execution under `invoke`).
+
 ## Development
 
 ```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
+# Install with dev dependencies (deepagents is dev-only, used by the
+# integration tests; the library itself does not depend on it)
+uv sync
 
 # Run tests
-pytest
+uv run pytest
 
 # Lint
-ruff check src tests
+uv run ruff check src tests
 ```
 
 ## License

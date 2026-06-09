@@ -8,15 +8,21 @@ from pydantic import BaseModel, ConfigDict, Field
 class EvalError(BaseModel):
     """Structured error payload returned in ``EvalPythonResult.error``.
 
-    Covers three distinct failure classes the LLM should be able to tell
+    Covers four distinct failure classes the LLM should be able to tell
     apart and respond to differently:
 
-    - Parse/compile errors raised when constructing the ``Monty(...)``
-      object — typically syntax or Monty-unsupported-feature errors
-      (e.g. classes, currently). The agent should fix the code.
-    - Resource-exhaustion errors raised by Monty during execution
-      (duration, memory, stack, allocations). The agent should reduce
-      scope.
+    - Parse/compile errors (``type="SyntaxError"``) raised when Monty
+      parses the code — typically syntax or Monty-unsupported-feature
+      errors (e.g. classes, currently). The agent should fix the code.
+    - Pre-execution static type-check failures
+      (``type="TypeCheckError"``) — the code referenced a host function
+      with a hallucinated keyword argument or a wrong argument type.
+      Nothing was executed; ``traceback`` carries per-line diagnostics.
+    - Runtime errors inside the sandbox, including resource exhaustion
+      (duration, memory, stack, allocations). ``type`` is the *real*
+      exception class the sandbox raised (e.g. ``ZeroDivisionError``)
+      and ``traceback`` is a full CPython-style traceback with line
+      numbers. The agent should fix the logic or reduce scope.
     - The interpreter-budget overflow we enforce ourselves
       (``IterationBudgetExceeded``). The agent is in a host-call loop and
       should restructure.
@@ -24,6 +30,16 @@ class EvalError(BaseModel):
 
     type: str = Field(description="Exception/error class name.")
     message: str = Field(description="Human-readable error message.")
+    traceback: str | None = Field(
+        default=None,
+        description=(
+            "Formatted diagnostics when Monty can provide them: a full "
+            "CPython-style traceback (line numbers + source preview) for "
+            "sandbox runtime errors, or per-line ``file:line:col`` "
+            "diagnostics for static type-check failures. ``None`` when no "
+            "richer rendering exists (e.g. host-side errors)."
+        ),
+    )
 
     model_config = ConfigDict(extra="forbid")
 

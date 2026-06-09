@@ -180,7 +180,12 @@ class TestErrorHandling:
     def test_runtime_error_returns_structured_error(self):
         r = self._run("1 / 0")
         assert r["error"] is not None
-        assert "ZeroDivisionError" in r["error"]["message"]
+        # ``type`` carries the real sandbox exception class (unwrapped from
+        # MontyRuntimeError) and ``traceback`` a CPython-style rendering with
+        # line numbers, so the agent can pinpoint the failing line.
+        assert r["error"]["type"] == "ZeroDivisionError"
+        assert "division by zero" in r["error"]["message"]
+        assert "Traceback" in r["error"]["traceback"]
 
     def test_index_out_of_range_returns_structured_error(self):
         r = self._run("[1, 2][99]")
