@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "langchain-monty"
-version = "0.1.1"
+version = "1.0.0"
 description = "Monty-backed code-interpreter middleware for deepagents"
 readme = "README.md"
 requires-python = ">=3.12"
