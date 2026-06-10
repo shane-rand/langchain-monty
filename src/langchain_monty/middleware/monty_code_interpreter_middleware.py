@@ -40,13 +40,32 @@ How the pieces fit together
 4.  **Human-in-the-loop / interrupts** — if a host tool raises
     ``GraphInterrupt`` (e.g. ``HumanInTheLoopMiddleware`` asking for
     approval), we *re-raise it* instead of feeding it into the sandbox.
-    LangGraph then checkpoints the graph and pauses. On resume, LangGraph
-    replays the ``eval_python`` tool call from the top; the interrupted
-    ``interrupt()`` call inside the host tool returns the recorded human
-    answer on replay, so execution proceeds. Caveat (inherent to LangGraph's
-    replay model): host tools called *before* the interrupt point are
-    re-invoked during the replay, so they should be idempotent when combined
-    with HITL.
+    LangGraph then checkpoints the graph and pauses. What happens when the
+    graph resumes depends on whether a LangGraph store is configured:
+
+    *With a store* (``runtime.store`` is set), the paused Monty VM is
+    serialized at interrupt time (``FunctionSnapshot.dump()``) into the
+    store, keyed by the eval_python tool call id. When LangGraph replays
+    the tool call, the snapshot is revived (``pydantic_monty
+    .load_snapshot()``) and execution *continues from the interrupted host
+    call*: host tools that already ran are NOT re-invoked, stdout is
+    preserved, and the interrupted tool is re-invoked once — its internal
+    ``interrupt()`` now returns the recorded human answer. The driver-side
+    state the snapshot can't carry (stdout text, budget counter, interrupt
+    bookkeeping) travels in ``LangchainStoreMontySnapshot``; see the
+    resume path in ``_sync_pass`` / ``_async_pass``.
+
+    *Without a store*, the original replay model applies: the whole tool
+    call re-runs from the top, so host tools called before the interrupt
+    point are re-invoked and should be idempotent when combined with HITL.
+
+    Scope and limitations of snapshot-resume: it covers the eager
+    (plain-call) execution path; interrupts escaping an awaited
+    ``asyncio.gather`` batch fall back to full replay. A single host tool
+    that calls ``interrupt()`` more than once per invocation desyncs the
+    positional interrupt-counter bookkeeping (see
+    ``_burn_answered_interrupts``); one interrupt per tool call — the
+    ``HumanInTheLoopMiddleware`` shape — is fully supported.
 
 Why we keep a hand-rolled drive loop instead of ``Monty.run_async()``
 =====================================================================
@@ -67,6 +86,7 @@ things the high-level API can't:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -90,7 +110,7 @@ from langchain_core.tools import StructuredTool
 # type; it cannot be honoured from inside a nested interpreter (see
 # _extract_tool_output).
 from langgraph.errors import GraphInterrupt
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from pydantic_monty import (
     CollectString,
     ExternalResult,
@@ -104,9 +124,15 @@ from pydantic_monty import (
     MontyTypingError,
     NameLookupSnapshot,
     OSAccess,
+    load_snapshot,
 )
 
-from langchain_monty.models import EvalError, EvalPythonResult, MontyLimits
+from langchain_monty.models import (
+    EvalError,
+    EvalPythonResult,
+    LangchainStoreMontySnapshot,
+    MontyLimits,
+)
 
 # --------------------------------------------------------------------------- #
 # Prompt blocks                                                               #
@@ -521,10 +547,16 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         def _complete_result(
             progress: MontyComplete,
             stdout: CollectString,
+            *,
+            stdout_prefix: str = "",
         ) -> dict[str, Any]:
+            # stdout_prefix carries text printed before a HITL interrupt:
+            # the print_callback is host-side state, not part of the VM
+            # snapshot, so a resumed run starts with a fresh collector and
+            # the earlier output travels in the snapshot record instead.
             return EvalPythonResult(
                 result=_jsonable_output(progress),
-                stdout=stdout.output or "",
+                stdout=stdout_prefix + (stdout.output or ""),
             ).model_dump()
 
         # --------------------------- drivers -------------------------------
@@ -606,11 +638,12 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 return _sync_pass(monty, host_tools, runtime, defer=False)
 
         def _sync_pass(
-            monty: Monty,
+            monty: Monty | None,
             host_tools: dict[str, BaseTool],
             runtime: ToolRuntime,
             *,
             defer: bool,
+            resume: LangchainStoreMontySnapshot | None = None,
         ) -> dict[str, Any]:
             """One pass over Monty's start/resume protocol (sync).
 
@@ -632,7 +665,19 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
               them concurrently) and resume with per-call results.
 
             ``GraphInterrupt`` raised by a host tool propagates out of this
-            loop on purpose — see the module docstring's HITL section.
+            loop on purpose — but the eager branch first dumps the paused
+            VM into the store so the inevitable LangGraph replay can
+            continue from the pause point. See the module docstring's HITL
+            section.
+
+            When ``resume`` is given (LangGraph replaying an interrupted
+            call), ``monty`` is ignored (may be ``None``): the persisted
+            ``FunctionSnapshot`` is revived in place of ``monty.start()``.
+            The loop's normal FunctionSnapshot dispatch then re-invokes the
+            interrupted call — the snapshot carries its own
+            ``function_name``/``args``/``kwargs`` — so no special re-invoke
+            step exists. Resume runs are always eager (``defer=False``):
+            only the eager path produces snapshots.
             """
             stdout = CollectString()
             os_handler = OSAccess()
@@ -643,16 +688,41 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             executed_any = False
             # Counts host-function calls (eager invocations + deferrals),
             # enforcing iteration_budget against runaway tool-call loops and
-            # oversized fan-outs alike.
-            host_calls = 0
+            # oversized fan-outs alike. Resume runs re-count the interrupted
+            # call, so the persisted value excludes it.
+            host_calls = resume.host_calls if resume is not None else 0
+            # Text printed before the interrupt (resume runs only) — the
+            # print_callback is not part of the VM snapshot.
+            stdout_prefix = resume.stdout if resume is not None else ""
+            # interrupt() answers consumed so far within this logical tool
+            # call; new captures persist this so the NEXT resume can burn
+            # the positional counter forward (_burn_answered_interrupts).
+            interrupts_answered = (
+                resume.interrupts_answered if resume is not None else 0
+            )
+            # On a resume run, the first FunctionSnapshot dispatched is the
+            # re-invoked interrupted call; completing it consumes one
+            # recorded human answer, which the bookkeeping must observe.
+            pending_answer = resume is not None
 
             try:
-                progress = monty.start(
-                    inputs={},
-                    limits=limits.to_monty(),
-                    print_callback=stdout,
-                    os=os_handler,
-                )
+                if resume is not None:
+                    # Advance LangGraph's positional interrupt counter past
+                    # the answers consumed before this snapshot was taken;
+                    # the re-invoked call's interrupt() then lands on ITS
+                    # recorded answer rather than an earlier one.
+                    _burn_answered_interrupts(interrupts_answered)
+                    progress = load_snapshot(
+                        base64.b64decode(resume.monty_snapshot),
+                        print_callback=stdout,
+                    )
+                else:
+                    progress = monty.start(
+                        inputs={},
+                        limits=limits.to_monty(),
+                        print_callback=stdout,
+                        os=os_handler,
+                    )
                 while not isinstance(progress, MontyComplete):
                     if isinstance(progress, NameLookupSnapshot):
                         # No external name providers; resuming with no value
@@ -699,7 +769,12 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     tool = host_tools.get(name)
                     if tool is None:
                         # Rejected immediately (never deferred) so the error
-                        # points at the exact call site.
+                        # points at the exact call site. If this is the
+                        # re-invoked interrupted call of a resume run (the
+                        # tool vanished between pause and resume), its
+                        # recorded answer was never consumed — don't count
+                        # it as answered.
+                        pending_answer = False
                         progress = progress.resume(
                             _allowlist_rejection(name, host_tools),
                             os=os_handler,
@@ -727,10 +802,31 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                         # _invoke_host_tool_sync re-raises it; every other
                         # exception comes back as a payload the sandbox code
                         # can try/except.
-                        progress = progress.resume(
-                            _invoke_host_tool_sync(tool, tool_kwargs, runtime),
-                            os=os_handler,
-                        )
+                        try:
+                            payload = _invoke_host_tool_sync(
+                                tool, tool_kwargs, runtime
+                            )
+                        except GraphInterrupt:
+                            # Dump the paused VM (progress has NOT been
+                            # resumed, so dump() is legal) so the LangGraph
+                            # replay can continue from here instead of
+                            # re-running every host call. host_calls - 1:
+                            # the interrupted call gets re-counted when the
+                            # resumed loop re-invokes it.
+                            _persist_hitl_record(
+                                runtime,
+                                progress,
+                                stdout_prefix + (stdout.output or ""),
+                                host_calls - 1,
+                                interrupts_answered,
+                            )
+                            raise
+                        if pending_answer:
+                            # The re-invoked interrupted call completed,
+                            # consuming its recorded human answer.
+                            interrupts_answered += 1
+                            pending_answer = False
+                        progress = progress.resume(payload, os=os_handler)
             except MontyError:
                 if defer and deferred and not executed_any:
                     # The failure may well be a *symptom* of the deferral
@@ -745,7 +841,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 if executed_any:
                     return _mixed_style_result()  # rerun would duplicate calls
                 raise _UnawaitedHostCalls  # plain-call style: rerun eagerly
-            return _complete_result(progress, stdout)
+            return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
 
         async def _drive_async(
             monty: Monty,
@@ -759,11 +855,12 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 return await _async_pass(monty, host_tools, runtime, defer=False)
 
         async def _async_pass(
-            monty: Monty,
+            monty: Monty | None,
             host_tools: dict[str, BaseTool],
             runtime: ToolRuntime,
             *,
             defer: bool,
+            resume: LangchainStoreMontySnapshot | None = None,
         ) -> dict[str, Any]:
             """One pass over the protocol (async twin of ``_sync_pass``).
 
@@ -790,7 +887,14 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             os_handler = OSAccess()
             deferred: dict[Any, tuple[BaseTool, dict[str, Any]]] = {}
             executed_any = False
-            host_calls = 0
+            # See _sync_pass for what each of these resume-seeded values
+            # means; the bookkeeping is identical in both drivers.
+            host_calls = resume.host_calls if resume is not None else 0
+            stdout_prefix = resume.stdout if resume is not None else ""
+            interrupts_answered = (
+                resume.interrupts_answered if resume is not None else 0
+            )
+            pending_answer = resume is not None
 
             async def _run_deferred(
                 call_id: int, tool: BaseTool, kwargs: dict[str, Any]
@@ -814,13 +918,25 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     return (call_id, _make_exception_result(exc))
 
             try:
-                progress = await asyncio.to_thread(
-                    monty.start,
-                    inputs={},
-                    limits=limits.to_monty(),
-                    print_callback=stdout,
-                    os=os_handler,
-                )
+                if resume is not None:
+                    # See _sync_pass: burn the positional interrupt counter
+                    # forward, then revive the paused VM in place of
+                    # monty.start(). Deserialization is a blocking Rust
+                    # call, so it's offloaded like every other VM step.
+                    _burn_answered_interrupts(interrupts_answered)
+                    progress = await asyncio.to_thread(
+                        load_snapshot,
+                        base64.b64decode(resume.monty_snapshot),
+                        print_callback=stdout,
+                    )
+                else:
+                    progress = await asyncio.to_thread(
+                        monty.start,
+                        inputs={},
+                        limits=limits.to_monty(),
+                        print_callback=stdout,
+                        os=os_handler,
+                    )
                 while not isinstance(progress, MontyComplete):
                     if isinstance(progress, NameLookupSnapshot):
                         # Same as sync: no value -> NameError in the sandbox.
@@ -866,6 +982,8 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     name = progress.function_name
                     tool = host_tools.get(name)
                     if tool is None:
+                        # See _sync_pass for the pending_answer edge here.
+                        pending_answer = False
                         progress = await asyncio.to_thread(
                             progress.resume,
                             _allowlist_rejection(name, host_tools),
@@ -884,9 +1002,24 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                             progress.resume, {"future": ...}, os=os_handler
                         )
                     else:
-                        payload = await _invoke_host_tool_async(
-                            tool, tool_kwargs, runtime
-                        )
+                        try:
+                            payload = await _invoke_host_tool_async(
+                                tool, tool_kwargs, runtime
+                            )
+                        except GraphInterrupt:
+                            # See _sync_pass: dump the (un-resumed) paused
+                            # VM so the replay continues from here.
+                            await _apersist_hitl_record(
+                                runtime,
+                                progress,
+                                stdout_prefix + (stdout.output or ""),
+                                host_calls - 1,
+                                interrupts_answered,
+                            )
+                            raise
+                        if pending_answer:
+                            interrupts_answered += 1
+                            pending_answer = False
                         progress = await asyncio.to_thread(
                             progress.resume, payload, os=os_handler
                         )
@@ -899,7 +1032,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 if executed_any:
                     return _mixed_style_result()  # rerun would duplicate calls
                 raise _UnawaitedHostCalls  # plain-call style: rerun eagerly
-            return _complete_result(progress, stdout)
+            return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
 
         # --------------------- the tool entrypoints ------------------------
 
@@ -913,6 +1046,35 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             runtime: ToolRuntime,
         ) -> dict[str, Any]:
             host_tools = _resolve_host_tools(runtime)
+
+            record = _load_hitl_record(runtime)
+            if record is not None:
+                # LangGraph is replaying this tool call after a HITL
+                # interrupt and a snapshot of the paused VM exists:
+                # continue from the interrupted host call instead of
+                # re-running the code (and every host tool before the
+                # pause) from the top. Parsing and type-checking are
+                # skipped — the code already ran up to the pause point.
+                # Resume runs go straight to one eager pass: the two-pass
+                # style detection only makes sense from a cold start, and
+                # snapshots are only ever taken in eager mode.
+                try:
+                    result = _sync_pass(
+                        None, host_tools, runtime, defer=False, resume=record
+                    )
+                except GraphInterrupt:
+                    # A later host call interrupted again; the capture
+                    # handler already overwrote the record. Keep it.
+                    raise
+                except MontyError as exc:
+                    result = _error_result(exc, code)
+                except Exception as exc:  # noqa: BLE001 — host-side failure
+                    result = _error_result(exc, code)
+                # Success or structured error, the call is finished —
+                # don't leave an orphaned snapshot behind.
+                _delete_hitl_record(runtime)
+                return result
+
             try:
                 # Parse + (optionally) static-type-check in one shot. Syntax
                 # and typing failures mean nothing was executed.
@@ -948,6 +1110,24 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             runtime: ToolRuntime,
         ) -> dict[str, Any]:
             host_tools = _resolve_host_tools(runtime)
+
+            record = await _aload_hitl_record(runtime)
+            if record is not None:
+                # See eval_python: continue from the interrupted host call
+                # instead of replaying the whole run.
+                try:
+                    result = await _async_pass(
+                        None, host_tools, runtime, defer=False, resume=record
+                    )
+                except GraphInterrupt:
+                    raise  # record already overwritten by the capture handler
+                except MontyError as exc:
+                    result = _error_result(exc, code)
+                except Exception as exc:  # noqa: BLE001 — host-side failure
+                    result = _error_result(exc, code)
+                await _adelete_hitl_record(runtime)
+                return result
+
             try:
                 # Monty.acreate parses (and type-checks) on a worker thread
                 # so a large source / stub set never blocks the event loop.
@@ -1188,6 +1368,192 @@ async def _invoke_host_tool_async(
         raise
     except Exception as exc:  # noqa: BLE001 — surfaced in-sandbox
         return _make_exception_result(exc)
+
+
+# --------------------------------------------------------------------------- #
+# HITL snapshot persistence                                                   #
+# --------------------------------------------------------------------------- #
+#
+# When a host tool raises GraphInterrupt mid-run, LangGraph checkpoints and
+# later REPLAYS the whole eval_python tool call. These helpers persist the
+# paused Monty VM (FunctionSnapshot.dump()) plus the driver-side sidecar
+# state into the agent's BaseStore so the replay can continue from the pause
+# point instead of re-running every host call — see the module docstring's
+# HITL section and LangchainStoreMontySnapshot for the record shape.
+#
+# Every helper degrades silently: no store, a broken record, or a failing
+# backend must never break eval_python — the worst acceptable outcome is the
+# original full-replay behaviour. In particular a persistence failure at
+# capture time must never mask the GraphInterrupt itself, which LangGraph
+# needs in order to pause the graph.
+
+
+def _snapshot_namespace(runtime: ToolRuntime) -> tuple[str, str, str]:
+    """Store namespace for HITL snapshots, scoped per conversation thread.
+
+    Must be byte-identical between the capture (put) and resume (get/delete)
+    sides — a mismatch degrades silently to full replay, so all three go
+    through this one helper.
+    """
+    config = getattr(runtime, "config", None) or {}
+    configurable = config.get("configurable") or {}
+    thread_id = configurable.get("thread_id")
+    return (
+        "langchain_monty",
+        "snapshots",
+        str(thread_id) if thread_id is not None else "default",
+    )
+
+
+def _hitl_store_key(runtime: ToolRuntime) -> str | None:
+    """The store key for this eval_python call, or None if unusable.
+
+    ``tool_call_id`` is the one identity LangGraph keeps stable across the
+    interrupt/replay cycle — the replayed task re-runs the SAME tool call —
+    which is what makes it the join key between the two executions.
+    """
+    tool_call_id = getattr(runtime, "tool_call_id", None)
+    return tool_call_id if isinstance(tool_call_id, str) and tool_call_id else None
+
+
+def _make_hitl_record(
+    progress: FunctionSnapshot,
+    stdout_text: str,
+    host_calls: int,
+    interrupts_answered: int,
+) -> LangchainStoreMontySnapshot:
+    """Build the store record for one paused VM (see the model's docstring)."""
+    return LangchainStoreMontySnapshot(
+        monty_snapshot=base64.b64encode(progress.dump()).decode("ascii"),
+        stdout=stdout_text,
+        host_calls=host_calls,
+        interrupts_answered=interrupts_answered,
+    )
+
+
+def _persist_hitl_record(
+    runtime: ToolRuntime,
+    progress: FunctionSnapshot,
+    stdout_text: str,
+    host_calls: int,
+    interrupts_answered: int,
+) -> None:
+    """Dump the paused VM into the store; failures degrade to full replay."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return
+    try:
+        record = _make_hitl_record(
+            progress, stdout_text, host_calls, interrupts_answered
+        )
+        store.put(_snapshot_namespace(runtime), key, record.model_dump())
+    except Exception:  # noqa: BLE001 — see section comment
+        pass
+
+
+async def _apersist_hitl_record(
+    runtime: ToolRuntime,
+    progress: FunctionSnapshot,
+    stdout_text: str,
+    host_calls: int,
+    interrupts_answered: int,
+) -> None:
+    """Async twin of _persist_hitl_record."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return
+    try:
+        record = _make_hitl_record(
+            progress, stdout_text, host_calls, interrupts_answered
+        )
+        await store.aput(_snapshot_namespace(runtime), key, record.model_dump())
+    except Exception:  # noqa: BLE001 — see section comment
+        pass
+
+
+def _load_hitl_record(runtime: ToolRuntime) -> LangchainStoreMontySnapshot | None:
+    """Fetch and validate the snapshot record for this tool call, if any."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return None
+    try:
+        item = store.get(_snapshot_namespace(runtime), key)
+        if item is None:
+            return None
+        return LangchainStoreMontySnapshot.model_validate(item.value)
+    except Exception:  # noqa: BLE001 — see section comment
+        return None
+
+
+async def _aload_hitl_record(
+    runtime: ToolRuntime,
+) -> LangchainStoreMontySnapshot | None:
+    """Async twin of _load_hitl_record."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return None
+    try:
+        item = await store.aget(_snapshot_namespace(runtime), key)
+        if item is None:
+            return None
+        return LangchainStoreMontySnapshot.model_validate(item.value)
+    except Exception:  # noqa: BLE001 — see section comment
+        return None
+
+
+def _delete_hitl_record(runtime: ToolRuntime) -> None:
+    """Remove the snapshot record once the call finishes (no orphans)."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return
+    try:
+        store.delete(_snapshot_namespace(runtime), key)
+    except Exception:  # noqa: BLE001 — see section comment
+        pass
+
+
+async def _adelete_hitl_record(runtime: ToolRuntime) -> None:
+    """Async twin of _delete_hitl_record."""
+    store = getattr(runtime, "store", None)
+    key = _hitl_store_key(runtime)
+    if store is None or key is None:
+        return
+    try:
+        await store.adelete(_snapshot_namespace(runtime), key)
+    except Exception:  # noqa: BLE001 — see section comment
+        pass
+
+
+def _burn_answered_interrupts(count: int) -> None:
+    """Advance LangGraph's positional interrupt counter past answered ones.
+
+    ``interrupt()`` matches resume values to calls POSITIONALLY per task
+    execution (``scratchpad.resume[interrupt_counter]``). A snapshot-resumed
+    run skips the host tools that already ran — including the ``interrupt()``
+    calls they made — so without correction, the re-invoked interrupted
+    tool's ``interrupt()`` would land on counter 0 and silently receive the
+    FIRST recorded answer instead of its own.
+
+    Each placeholder call here hits the "already answered" branch inside
+    ``interrupt()`` (``idx < len(scratchpad.resume)``): it returns a stored
+    answer — discarded — and advances the counter by one. After ``count``
+    burns, the next real ``interrupt()`` lands on the right index.
+
+    The placeholder value is only ever surfaced to a human if the counter
+    bookkeeping is wrong (no stored answer at that index), in which case the
+    graph pauses on it — loud and diagnosable rather than silently feeding a
+    tool someone else's answer.
+    """
+    for _ in range(count):
+        interrupt(
+            "langchain-monty internal: interrupt-counter sync for snapshot "
+            "resume — if you are seeing this, please report a bug"
+        )
 
 
 # --------------------------------------------------------------------------- #
