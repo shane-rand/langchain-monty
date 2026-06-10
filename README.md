@@ -137,7 +137,13 @@ Disable with `MontyCodeInterpreterMiddleware(type_check=False)` if Monty's check
 
 ### Human-in-the-loop and interrupts
 
-When a bridged host tool raises `GraphInterrupt` (e.g. `HumanInTheLoopMiddleware` asking for approval), the middleware re-raises it instead of feeding it into the sandbox, so LangGraph checkpoints and pauses normally. On resume, LangGraph replays the `eval_python` tool call from the top; the interrupted tool's `interrupt()` returns the recorded human answer on replay and execution proceeds. Caveat (inherent to LangGraph's replay model): host tools called *before* the interrupt point are re-invoked during the replay, so combine HITL with idempotent tools.
+When a bridged host tool raises `GraphInterrupt` (e.g. `HumanInTheLoopMiddleware` asking for approval), the middleware re-raises it instead of feeding it into the sandbox, so LangGraph checkpoints and pauses normally. What happens on resume depends on whether the agent has a [LangGraph store](https://langchain-ai.github.io/langgraph/concepts/persistence/#memory-store):
+
+**With a store** (`create_agent(..., store=...)`), the paused Monty VM is serialized (`FunctionSnapshot.dump()`) into the store at interrupt time, keyed by the tool call id. When LangGraph replays the `eval_python` call, the snapshot is revived (`pydantic_monty.load_snapshot()`) and execution **continues from the interrupted host call**: host tools that already ran are *not* re-invoked, stdout printed before the pause is preserved, and the iteration budget keeps counting across the pause. Only the interrupted tool itself is re-invoked — its `interrupt()` then returns the recorded human answer. The snapshot record is deleted from the store when the call finishes. Multiple sequential interrupts within one snippet are supported.
+
+**Without a store**, LangGraph's plain replay model applies: on resume the whole `eval_python` call re-runs from the top, so host tools called *before* the interrupt point are re-invoked — combine HITL with idempotent tools in this mode.
+
+Scope notes for snapshot-resume: it covers the plain-call execution path; an interrupt escaping an awaited `asyncio.gather` batch falls back to full replay. A single host tool that calls `interrupt()` more than once per invocation is not supported by the resume bookkeeping (one interrupt per tool call — the `HumanInTheLoopMiddleware` shape — is fully supported). Persistence failures degrade silently to the replay model, never to a broken run.
 
 ## Building tools for the sandbox
 
