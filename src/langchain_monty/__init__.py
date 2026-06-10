@@ -1,8 +1,12 @@
-"""langchain-monty: a Monty-backed code-interpreter middleware for deepagents.
+"""langchain-monty: a Monty-backed code-interpreter middleware for LangChain agents.
 
 Python sibling of ``langchain-quickjs``. Provides ``MontyCodeInterpreterMiddleware``,
 which contributes an ``eval_python`` tool backed by ``pydantic_monty`` — the
 Rust-implemented sandboxed Python interpreter from Pydantic.
+
+Works with any LangChain v1 agent (``langchain.agents.create_agent``) as well
+as deepagents (``create_deep_agent``); there is no runtime dependency on
+deepagents.
 """
 
 from langchain_monty.middleware import (
@@ -21,7 +25,3 @@ __all__ = [
     "CODE_INTERPRETER_SYSTEM_PROMPT",
     "CODE_INTERPRETER_TOOL_DESCRIPTION",
 ]
-
-
-def main() -> None:
-    print("Hello from langchain-monty!")
