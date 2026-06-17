@@ -1,6 +1,65 @@
 # CHANGELOG
 
 
+## Unreleased
+
+### Chores
+
+- Sync uv.lock package version to 2.1.0
+  ([`de30e03`](https://github.com/shane-rand/langchain-monty/commit/de30e036f7aa091fb399a2c58346e728d4e4c10c))
+
+### Continuous Integration
+
+- Add pytest workflow on PRs to main
+  ([`097dccc`](https://github.com/shane-rand/langchain-monty/commit/097dccc5275ccbc17ea19885d0f2a21c261c3f06))
+
+
+## v2.1.0 (2026-06-10)
+
+### Features
+
+- Resume interrupted eval_python calls from a Monty VM snapshot
+  ([`7fbdf33`](https://github.com/shane-rand/langchain-monty/commit/7fbdf336bd32788a33f5bccbe4378d19e64ce087))
+
+
+## v2.0.0 (2026-06-10)
+
+### Chores
+
+- Sync uv.lock with 1.0.0 version bump
+  ([`8847438`](https://github.com/shane-rand/langchain-monty/commit/8847438a478806d745e41cfdd01eacaa9f76884b))
+
+### Features
+
+- Idiomatic Monty + LangChain middleware overhaul
+  ([`af2585b`](https://github.com/shane-rand/langchain-monty/commit/af2585b5d0e15c7aae896d1d491b6361039204c7))
+
+### Breaking Changes
+
+- The skills_backend constructor parameter is removed (it was stored but never read — a documented
+  no-op); iteration_budget now counts individual host-tool calls (a gather fan-out of N costs N)
+  rather than counting a whole batch as one round-trip; EvalError gains a traceback field and
+  error.type now reports the real sandbox exception class instead of Monty wrapper names.
+
+
+## v1.0.0 (2026-06-09)
+
+### Continuous Integration
+
+- Fixing semantic-release
+  ([`703e495`](https://github.com/shane-rand/langchain-monty/commit/703e495018a8b055946cf00061d0e6456ef1c8ce))
+
+### Documentation
+
+- Update installation command for langchain-monty
+  ([`8c2c2ee`](https://github.com/shane-rand/langchain-monty/commit/8c2c2ee15e86883ee36511deaacbcfb8fd27cb85))
+
+### Features
+
+- Async support for when llms make concurrent tool calls
+  ([`f3e4fc7`](https://github.com/shane-rand/langchain-monty/commit/f3e4fc716dcced9afdadc5b8a5a4b2363e52e0f5))
+
+
 ## v0.1.1 (2026-06-03)
 
 ### Bug Fixes
@@ -19,56 +78,4 @@
 
 ## v0.1.0 (2026-06-03)
 
-### Bug Fixes
-
-- Middleware was dropping tools being added by other middleware
-  ([`796f107`](https://github.com/shane-rand/langchain-monty/commit/796f1072c9014bc01368de266af8e2c650e0edc9))
-
-- Os calls now execute natively rather than tools
-  ([`d53fe4e`](https://github.com/shane-rand/langchain-monty/commit/d53fe4e5668c4003249df2becd019432d831b801))
-
-### Continuous Integration
-
-- Add semantic release workflow for automated PyPI publishing
-  ([`0ea9907`](https://github.com/shane-rand/langchain-monty/commit/0ea99074fac507a66f16c33dbc0bb8088f74156e))
-
-Adds GitHub Actions workflow that uses python-semantic-release to parse conventional commits
-  (feat/fix/BREAKING CHANGE) and automatically bump the semver, tag, create a GitHub release, build,
-  and publish to PyPI via OIDC trusted publishing.
-
-https://claude.ai/code/session_01AcGiB8v8YKR7xUgK1p7kmh
-
-- Enable uv caching and freeze lockfile on build
-  ([`651aca8`](https://github.com/shane-rand/langchain-monty/commit/651aca820819509f11325933c0becbb6e301bdb1))
-
-Enable setup-uv package cache so downloaded wheels are reused across workflow runs. Pass --frozen to
-  uv build so the build fails fast if uv.lock is out of sync with pyproject.toml.
-
-https://claude.ai/code/session_01AcGiB8v8YKR7xUgK1p7kmh
-
-- Fixing uv build command to happen in the workflow
-  ([`cc2ba94`](https://github.com/shane-rand/langchain-monty/commit/cc2ba9459f4534127be2f44b5bf2de2500c12c76))
-
-- Removing build_command prop entirely
-  ([`9fc73d1`](https://github.com/shane-rand/langchain-monty/commit/9fc73d19545846bd1b8e48a31dfcc07e465eba27))
-
-- Switch build and publish to uv
-  ([`9f7fa5e`](https://github.com/shane-rand/langchain-monty/commit/9f7fa5eb0adae49a1edab13bec32e47774b164c6))
-
-Replace `pip install build && python -m build` with `uv build` and `pypa/gh-action-pypi-publish`
-  with `uv publish --trusted-publishing always`.
-
-https://claude.ai/code/session_01AcGiB8v8YKR7xUgK1p7kmh
-
-- Using new token for version bump push
-  ([`c45cd6f`](https://github.com/shane-rand/langchain-monty/commit/c45cd6fd9df26c0609107e7a08159c9bd45f0aeb))
-
-### Documentation
-
-- Initial README
-  ([`5e081ff`](https://github.com/shane-rand/langchain-monty/commit/5e081ff1a6efaa8215f727c6ff976c7106537858))
-
-### Features
-
-- Initial middleware development
-  ([`7c7706b`](https://github.com/shane-rand/langchain-monty/commit/7c7706b1cecea4e713fb9fcef72eb161238ec84c))
+- Initial Release
