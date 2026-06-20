@@ -1,10 +1,12 @@
 from unittest.mock import MagicMock
 
-from langchain_monty.middleware.monty_code_interpreter_middleware import (
-    _INJECTED_PARAM_NAMES,  # noqa: PLC2701
-    _normalize_call_args,  # noqa: PLC2701
-    _visible_schema_fields,  # noqa: PLC2701
+from langchain_monty.bridge import INJECTED_PARAM_NAMES
+from langchain_monty.middleware._tool_rendering import (  # noqa: PLC2701
+    _normalize_call_args,
+    _visible_schema_fields,
 )
+
+_INJECTED_PARAM_NAMES = INJECTED_PARAM_NAMES
 
 
 def _make_snapshot(function_name="search", args=(), kwargs=None):

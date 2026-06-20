@@ -487,7 +487,7 @@ class TestEvalPythonSync:
                 return_value=mock_stdout,
             ),
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware._deserialize_return_value",
+                "langchain_monty.bridge.bridge.deserialize_return_value",
                 side_effect=TypeError("not JSON serializable"),
             ),
         ):
