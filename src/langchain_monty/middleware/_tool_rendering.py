@@ -9,7 +9,7 @@ from langchain.tools import BaseTool
 from langchain_core.messages import ContentBlock, SystemMessage
 from pydantic_monty import FunctionSnapshot
 
-from langchain_monty.bridge import INJECTED_PARAM_NAMES
+from langchain_monty.middleware._bridge import INJECTED_PARAM_NAMES
 
 
 def _visible_parameters(tool: BaseTool) -> list[tuple[str, str, bool]]:
