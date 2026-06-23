@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from langchain_monty.bridge import INJECTED_PARAM_NAMES
+from langchain_monty.middleware._bridge import INJECTED_PARAM_NAMES
 from langchain_monty.middleware._tool_rendering import (  # noqa: PLC2701
     _normalize_call_args,
     _visible_schema_fields,

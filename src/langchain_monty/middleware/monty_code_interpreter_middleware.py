@@ -34,7 +34,7 @@ from pydantic_monty import (
     load_snapshot,
 )
 
-from langchain_monty.bridge import (
+from langchain_monty.middleware._bridge import (
     invoke_host_tool_async,
     invoke_host_tool_sync,
 )
