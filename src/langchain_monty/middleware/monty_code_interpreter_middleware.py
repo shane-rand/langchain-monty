@@ -261,8 +261,6 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     )
                 except GraphInterrupt:
                     raise  # capture handler already overwrote the record
-                except MontyError as exc:
-                    result = _error_result(exc, code)
                 except Exception as exc:  # noqa: BLE001
                     result = _error_result(exc, code)
                 _delete_hitl_record(runtime)
@@ -283,8 +281,6 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 )
             except GraphInterrupt:
                 raise
-            except MontyError as exc:
-                return _error_result(exc, code)
             except Exception as exc:  # noqa: BLE001
                 return _error_result(exc, code)
 
@@ -309,8 +305,6 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                     )
                 except GraphInterrupt:
                     raise
-                except MontyError as exc:
-                    result = _error_result(exc, code)
                 except Exception as exc:  # noqa: BLE001
                     result = _error_result(exc, code)
                 await _adelete_hitl_record(runtime)
@@ -332,8 +326,6 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 )
             except GraphInterrupt:
                 raise
-            except MontyError as exc:
-                return _error_result(exc, code)
             except Exception as exc:  # noqa: BLE001
                 return _error_result(exc, code)
 
@@ -555,6 +547,42 @@ async def _run_deferred(
         return (call_id, make_exception_result(exc))
 
 
+def _init_pass_state(
+    resume: LangchainStoreMontySnapshot | None,
+) -> tuple[int, str, int, bool]:
+    """Per-pass accumulators seeded from a resumed snapshot (identical sync/async).
+
+    Returns ``(host_calls, stdout_prefix, interrupts_answered, pending_answer)``.
+    """
+    if resume is None:
+        return 0, "", 0, False
+    return (
+        resume.host_calls,
+        resume.stdout,
+        resume.interrupts_answered,
+        True,  # first FunctionSnapshot is the re-invoked interrupted call
+    )
+
+
+def _finish_pass(
+    deferred: dict[Any, tuple[BaseTool, dict[str, Any]]],
+    executed_any: bool,
+    progress: MontyComplete,
+    stdout: CollectString,
+    stdout_prefix: str,
+) -> dict[str, Any]:
+    """Terminal result of a pass (identical sync/async).
+
+    Raises ``_UnawaitedHostCalls`` to request an eager rerun when futures were
+    recorded but never awaited.
+    """
+    if deferred:
+        if executed_any:
+            return _mixed_style_result()
+        raise _UnawaitedHostCalls
+    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
+
+
 def _drive_sync(
     monty: Monty,
     host_tools: dict[str, BaseTool],
@@ -596,18 +624,16 @@ def _sync_pass(
 
     When ``resume`` is given, ``monty`` is ignored and the persisted snapshot
     is revived instead of calling ``monty.start()``.
+
+    Mirror of ``_async_pass``; keep the two in sync when changing the protocol.
     """
     stdout = CollectString()
     os_handler = OSAccess()
     deferred: dict[Any, tuple[BaseTool, dict[str, Any]]] = {}
     executed_any = False
-    host_calls = resume.host_calls if resume is not None else 0
-    stdout_prefix = resume.stdout if resume is not None else ""
-    interrupts_answered = (
-        resume.interrupts_answered if resume is not None else 0
+    host_calls, stdout_prefix, interrupts_answered, pending_answer = (
+        _init_pass_state(resume)
     )
-    # Tracks whether the first FunctionSnapshot is the re-invoked interrupted call.
-    pending_answer = resume is not None
 
     try:
         if resume is not None:
@@ -701,11 +727,7 @@ def _sync_pass(
             raise _UnawaitedHostCalls from None
         raise
 
-    if deferred:
-        if executed_any:
-            return _mixed_style_result()
-        raise _UnawaitedHostCalls
-    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
+    return _finish_pass(deferred, executed_any, progress, stdout, stdout_prefix)
 
 
 async def _drive_async(
@@ -745,17 +767,16 @@ async def _async_pass(
     1. ``FutureSnapshot`` batches run concurrently via ``asyncio.gather``.
     2. Blocking Rust VM steps are offloaded to a worker thread via
        ``asyncio.to_thread`` to avoid freezing the event loop.
+
+    Mirror of ``_sync_pass``; keep the two in sync when changing the protocol.
     """
     stdout = CollectString()
     os_handler = OSAccess()
     deferred: dict[Any, tuple[BaseTool, dict[str, Any]]] = {}
     executed_any = False
-    host_calls = resume.host_calls if resume is not None else 0
-    stdout_prefix = resume.stdout if resume is not None else ""
-    interrupts_answered = (
-        resume.interrupts_answered if resume is not None else 0
+    host_calls, stdout_prefix, interrupts_answered, pending_answer = (
+        _init_pass_state(resume)
     )
-    pending_answer = resume is not None
 
     try:
         if resume is not None:
@@ -857,9 +878,5 @@ async def _async_pass(
             raise _UnawaitedHostCalls from None
         raise
 
-    if deferred:
-        if executed_any:
-            return _mixed_style_result()
-        raise _UnawaitedHostCalls
-    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
+    return _finish_pass(deferred, executed_any, progress, stdout, stdout_prefix)
 
