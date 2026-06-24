@@ -236,7 +236,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         limits = self._limits
         budget = self._iteration_budget
         type_check = self._type_check
-        tmpl = self._description_template
+        description_template = self._description_template
         schemas_in_desc = self.system_prompt is None
 
         def eval_python(
@@ -333,7 +333,9 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             name="eval_python",
             func=eval_python,
             coroutine=aeval_python,
-            description=_render_description(ptc, ptc_tools, limits, schemas_in_desc, tmpl),
+            description=_render_description(
+                ptc, ptc_tools, limits, schemas_in_desc, description_template
+            ),
         )
 
     # ---------------------------------------------------------- prompt hooks
@@ -385,7 +387,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 # --------------------------------------------------------------------------- #
 
 
-def _fmt_limit(value: Any) -> Any:
+def _format_limit(value: Any) -> Any:
     return "unlimited" if value is None else value
 
 
@@ -419,9 +421,9 @@ def _render_description(
         )
     return description_template.format(
         available_host_tools=listing,
-        max_duration_secs=_fmt_limit(limits.max_duration_secs),
-        max_memory_bytes=_fmt_limit(limits.max_memory_bytes),
-        max_stack_depth=_fmt_limit(limits.max_stack_depth),
+        max_duration_secs=_format_limit(limits.max_duration_secs),
+        max_memory_bytes=_format_limit(limits.max_memory_bytes),
+        max_stack_depth=_format_limit(limits.max_stack_depth),
     )
 
 
@@ -431,14 +433,14 @@ def _resolve_host_tools(
     ptc: frozenset[str],
 ) -> dict[str, BaseTool]:
     """Merge construction-time tools with deferred ones resolved from the runtime."""
-    out = {
+    resolved_tools = {
         name: tool for name, tool in ptc_tools.items() if name != "eval_python"
     }
     bound = getattr(runtime, "tools", None) or []
     for t in bound:
-        if t.name in ptc and t.name != "eval_python" and t.name not in out:
-            out[t.name] = t
-    return out
+        if t.name in ptc and t.name != "eval_python" and t.name not in resolved_tools:
+            resolved_tools[t.name] = t
+    return resolved_tools
 
 
 def _compile_kwargs(

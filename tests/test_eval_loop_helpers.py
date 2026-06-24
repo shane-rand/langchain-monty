@@ -14,7 +14,7 @@ from langchain_monty.middleware.monty_code_interpreter_middleware import (
     _compile_kwargs,
     _complete_result,
     _error_result,
-    _fmt_limit,
+    _format_limit,
     _iteration_budget_result,
     _mixed_style_result,
     _render_description,
@@ -24,20 +24,20 @@ from langchain_monty.models import MontyLimits
 
 
 # ---------------------------------------------------------------------------
-# _fmt_limit
+# _format_limit
 # ---------------------------------------------------------------------------
 
 
-class TestFmtLimit:
+class TestFormatLimit:
     def test_none_returns_unlimited(self):
-        assert _fmt_limit(None) == "unlimited"
+        assert _format_limit(None) == "unlimited"
 
     def test_numeric_value_returned_as_is(self):
-        assert _fmt_limit(5) == 5
-        assert _fmt_limit(3.14) == 3.14
+        assert _format_limit(5) == 5
+        assert _format_limit(3.14) == 3.14
 
     def test_zero_returned_as_is(self):
-        assert _fmt_limit(0) == 0
+        assert _format_limit(0) == 0
 
 
 # ---------------------------------------------------------------------------
