@@ -184,10 +184,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -205,7 +205,7 @@ class TestEvalPythonSync:
         runtime = _make_runtime()
 
         with patch(
-            "langchain_monty.middleware.monty_code_interpreter_middleware.Monty",
+            "langchain_monty.middleware._driver.Monty",
             side_effect=SyntaxError("bad syntax"),
         ):
             result = self._invoke(m, "???", runtime)
@@ -219,7 +219,7 @@ class TestEvalPythonSync:
         runtime = _make_runtime()
 
         with patch(
-            "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            "langchain_monty.middleware._driver.Monty"
         ) as MockMonty:
             instance = MockMonty.return_value
             instance.start.side_effect = RuntimeError("out of memory")
@@ -252,10 +252,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -289,10 +289,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -328,10 +328,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -368,10 +368,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -403,10 +403,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -435,10 +435,10 @@ class TestEvalPythonSync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -480,10 +480,10 @@ class TestEvalPythonSync:
         # Patch _deserialize_return_value to raise
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
             patch(
@@ -529,7 +529,7 @@ class TestEvalPythonAsync:
         runtime = _make_runtime()
 
         with patch(
-            "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+            "langchain_monty.middleware._driver.Monty"
         ) as MockMonty:
             MockMonty.acreate = AsyncMock(side_effect=ValueError("parse error"))
             result = await self._invoke(m, "bad code", runtime)
@@ -553,10 +553,10 @@ class TestEvalPythonAsync:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -620,10 +620,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -667,10 +667,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -723,10 +723,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -759,10 +759,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -799,10 +799,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
@@ -834,10 +834,10 @@ class TestEvalPythonAsyncGather:
 
         with (
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.Monty"
+                "langchain_monty.middleware._driver.Monty"
             ) as MockMonty,
             patch(
-                "langchain_monty.middleware.monty_code_interpreter_middleware.CollectString",
+                "langchain_monty.middleware._driver.CollectString",
                 return_value=mock_stdout,
             ),
         ):
