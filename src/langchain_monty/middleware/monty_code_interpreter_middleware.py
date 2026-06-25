@@ -1,10 +1,9 @@
-"""LangChain middleware wiring pydantic-monty into an agent as an ``eval_python`` tool."""
+"""LangChain middleware exposing pydantic-monty to an agent as ``eval_python``."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, Any
 
@@ -17,7 +16,6 @@ from langchain.agents.middleware.types import (
 )
 from langchain.tools import BaseTool, ToolRuntime
 from langchain_core.tools import StructuredTool
-
 from langgraph.errors import GraphInterrupt
 from pydantic_monty import (
     CollectString,
@@ -64,10 +62,6 @@ from langchain_monty.models import (
     LangchainStoreMontySnapshot,
     MontyLimits,
 )
-
-# --------------------------------------------------------------------------- #
-# Prompt blocks                                                               #
-# --------------------------------------------------------------------------- #
 
 CODE_INTERPRETER_SYSTEM_PROMPT = """## `eval_python` (Monty runtime)
 
@@ -130,18 +124,8 @@ Example:
 """
 
 
-# --------------------------------------------------------------------------- #
-# Internal control flow                                                       #
-# --------------------------------------------------------------------------- #
-
-
 class _UnawaitedHostCalls(Exception):
     """Deferred pass ended with never-awaited futures; driver should restart eagerly."""
-
-
-# --------------------------------------------------------------------------- #
-# Middleware                                                                  #
-# --------------------------------------------------------------------------- #
 
 
 class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
@@ -236,7 +220,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         limits = self._limits
         budget = self._iteration_budget
         type_check = self._type_check
-        tmpl = self._description_template
+        description_template = self._description_template
         schemas_in_desc = self.system_prompt is None
 
         def eval_python(
@@ -255,14 +239,16 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 # Resume from the interrupted host call; skip parsing/type-check.
                 try:
                     result = _sync_pass(
-                        None, host_tools, runtime,
-                        defer=False, resume=record,
-                        limits=limits, iteration_budget=budget,
+                        None,
+                        host_tools,
+                        runtime,
+                        defer=False,
+                        resume=record,
+                        limits=limits,
+                        iteration_budget=budget,
                     )
                 except GraphInterrupt:
                     raise  # capture handler already overwrote the record
-                except MontyError as exc:
-                    result = _error_result(exc, code)
                 except Exception as exc:  # noqa: BLE001
                     result = _error_result(exc, code)
                 _delete_hitl_record(runtime)
@@ -278,13 +264,14 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 return _error_result(exc, code)
             try:
                 return _drive_sync(
-                    monty, host_tools=host_tools, runtime=runtime,
-                    limits=limits, iteration_budget=budget,
+                    monty,
+                    host_tools=host_tools,
+                    runtime=runtime,
+                    limits=limits,
+                    iteration_budget=budget,
                 )
             except GraphInterrupt:
                 raise
-            except MontyError as exc:
-                return _error_result(exc, code)
             except Exception as exc:  # noqa: BLE001
                 return _error_result(exc, code)
 
@@ -303,21 +290,23 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             if record is not None:
                 try:
                     result = await _async_pass(
-                        None, host_tools, runtime,
-                        defer=False, resume=record,
-                        limits=limits, iteration_budget=budget,
+                        None,
+                        host_tools,
+                        runtime,
+                        defer=False,
+                        resume=record,
+                        limits=limits,
+                        iteration_budget=budget,
                     )
                 except GraphInterrupt:
                     raise
-                except MontyError as exc:
-                    result = _error_result(exc, code)
                 except Exception as exc:  # noqa: BLE001
                     result = _error_result(exc, code)
                 await _adelete_hitl_record(runtime)
                 return result
 
             try:
-                # acreate parses/type-checks on a worker thread to avoid blocking the loop.
+                # acreate parses/type-checks on a worker thread, off the loop.
                 monty = await Monty.acreate(
                     code, inputs=[], **_compile_kwargs(host_tools, type_check, ptc)
                 )
@@ -327,13 +316,14 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 return _error_result(exc, code)
             try:
                 return await _drive_async(
-                    monty, host_tools=host_tools, runtime=runtime,
-                    limits=limits, iteration_budget=budget,
+                    monty,
+                    host_tools=host_tools,
+                    runtime=runtime,
+                    limits=limits,
+                    iteration_budget=budget,
                 )
             except GraphInterrupt:
                 raise
-            except MontyError as exc:
-                return _error_result(exc, code)
             except Exception as exc:  # noqa: BLE001
                 return _error_result(exc, code)
 
@@ -341,15 +331,15 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             name="eval_python",
             func=eval_python,
             coroutine=aeval_python,
-            description=_render_description(ptc, ptc_tools, limits, schemas_in_desc, tmpl),
+            description=_render_description(
+                ptc, ptc_tools, limits, schemas_in_desc, description_template
+            ),
         )
-
-    # ---------------------------------------------------------- prompt hooks
 
     def _amend_model_request(
         self, request: ModelRequest[ContextT]
     ) -> ModelRequest[ContextT]:
-        """Append the system-prompt block, including dynamically-resolved deferred schemas."""
+        """Append the system-prompt block plus any runtime-resolved schemas."""
         if self.system_prompt is None:
             return request
 
@@ -388,12 +378,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         return await handler(self._amend_model_request(request))
 
 
-# --------------------------------------------------------------------------- #
-# Eval-loop helpers                                                           #
-# --------------------------------------------------------------------------- #
-
-
-def _fmt_limit(value: Any) -> Any:
+def _format_limit(value: Any) -> Any:
     return "unlimited" if value is None else value
 
 
@@ -409,9 +394,7 @@ def _render_description(
         listing = "(none — interpreter is pure-compute only)"
     elif schemas_in_description:
         parts = [
-            _format_tool_schema(ptc_tools[n])
-            for n in allowlisted
-            if n in ptc_tools
+            _format_tool_schema(ptc_tools[n]) for n in allowlisted if n in ptc_tools
         ]
         deferred = [n for n in allowlisted if n not in ptc_tools]
         if deferred:
@@ -422,14 +405,13 @@ def _render_description(
         listing = "\n\n".join(parts)
     else:
         listing = (
-            ", ".join(allowlisted)
-            + "\n(full signatures are in the system prompt)"
+            ", ".join(allowlisted) + "\n(full signatures are in the system prompt)"
         )
     return description_template.format(
         available_host_tools=listing,
-        max_duration_secs=_fmt_limit(limits.max_duration_secs),
-        max_memory_bytes=_fmt_limit(limits.max_memory_bytes),
-        max_stack_depth=_fmt_limit(limits.max_stack_depth),
+        max_duration_secs=_format_limit(limits.max_duration_secs),
+        max_memory_bytes=_format_limit(limits.max_memory_bytes),
+        max_stack_depth=_format_limit(limits.max_stack_depth),
     )
 
 
@@ -439,14 +421,14 @@ def _resolve_host_tools(
     ptc: frozenset[str],
 ) -> dict[str, BaseTool]:
     """Merge construction-time tools with deferred ones resolved from the runtime."""
-    out = {
+    resolved_tools = {
         name: tool for name, tool in ptc_tools.items() if name != "eval_python"
     }
     bound = getattr(runtime, "tools", None) or []
     for t in bound:
-        if t.name in ptc and t.name != "eval_python" and t.name not in out:
-            out[t.name] = t
-    return out
+        if t.name in ptc and t.name != "eval_python" and t.name not in resolved_tools:
+            resolved_tools[t.name] = t
+    return resolved_tools
 
 
 def _compile_kwargs(
@@ -492,9 +474,7 @@ def _error_result(exc: BaseException, code: str = "") -> dict[str, Any]:
         message = exc.display("msg")
 
     return EvalPythonResult(
-        error=EvalError(
-            type=err_type, message=message, traceback=traceback_text
-        ),
+        error=EvalError(type=err_type, message=message, traceback=traceback_text),
         attempted_code=code or None,
     ).model_dump()
 
@@ -505,7 +485,8 @@ def _complete_result(
     *,
     stdout_prefix: str = "",
 ) -> dict[str, Any]:
-    # stdout_prefix carries text printed before a HITL interrupt (not in the VM snapshot).
+    # stdout_prefix carries text printed before a HITL interrupt
+    # (not captured in the VM snapshot).
     return EvalPythonResult(
         result=jsonable_output(progress),
         stdout=stdout_prefix + (stdout.output or ""),
@@ -543,7 +524,10 @@ async def _run_deferred(
     kwargs: dict[str, Any],
     runtime: ToolRuntime,
 ) -> tuple[int, ExternalResult]:
-    """Execute one deferred host call; tag result with its id. GraphInterrupt re-raises."""
+    """Execute one deferred host call, tagging the result with its id.
+
+    GraphInterrupt re-raises.
+    """
     try:
         return (
             call_id,
@@ -553,6 +537,42 @@ async def _run_deferred(
         raise
     except Exception as exc:  # noqa: BLE001
         return (call_id, make_exception_result(exc))
+
+
+def _init_pass_state(
+    resume: LangchainStoreMontySnapshot | None,
+) -> tuple[int, str, int, bool]:
+    """Per-pass accumulators seeded from a resumed snapshot (identical sync/async).
+
+    Returns ``(host_calls, stdout_prefix, interrupts_answered, pending_answer)``.
+    """
+    if resume is None:
+        return 0, "", 0, False
+    return (
+        resume.host_calls,
+        resume.stdout,
+        resume.interrupts_answered,
+        True,  # first FunctionSnapshot is the re-invoked interrupted call
+    )
+
+
+def _finish_pass(
+    deferred: dict[Any, tuple[BaseTool, dict[str, Any]]],
+    executed_any: bool,
+    progress: MontyComplete,
+    stdout: CollectString,
+    stdout_prefix: str,
+) -> dict[str, Any]:
+    """Terminal result of a pass (identical sync/async).
+
+    Raises ``_UnawaitedHostCalls`` to request an eager rerun when futures were
+    recorded but never awaited.
+    """
+    if deferred:
+        if executed_any:
+            return _mixed_style_result()
+        raise _UnawaitedHostCalls
+    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
 
 
 def _drive_sync(
@@ -566,13 +586,21 @@ def _drive_sync(
     """Deferred pass first; fall back to eager if code never awaited its futures."""
     try:
         return _sync_pass(
-            monty, host_tools, runtime,
-            defer=True, limits=limits, iteration_budget=iteration_budget,
+            monty,
+            host_tools,
+            runtime,
+            defer=True,
+            limits=limits,
+            iteration_budget=iteration_budget,
         )
     except _UnawaitedHostCalls:
         return _sync_pass(
-            monty, host_tools, runtime,
-            defer=False, limits=limits, iteration_budget=iteration_budget,
+            monty,
+            host_tools,
+            runtime,
+            defer=False,
+            limits=limits,
+            iteration_budget=iteration_budget,
         )
 
 
@@ -591,23 +619,21 @@ def _sync_pass(
     Dispatches on progress type each iteration:
     - ``MontyComplete``: done.
     - ``FunctionSnapshot``: host call. Eager: invoke now. Deferred: record a future.
-    - ``FutureSnapshot``: sandbox awaited; execute batch sequentially, resume with results.
+    - ``FutureSnapshot``: sandbox awaited; run batch sequentially, resume with results.
     - ``NameLookupSnapshot``: unknown name; resume without value → NameError in sandbox.
 
     When ``resume`` is given, ``monty`` is ignored and the persisted snapshot
     is revived instead of calling ``monty.start()``.
+
+    Mirror of ``_async_pass``; keep the two in sync when changing the protocol.
     """
     stdout = CollectString()
     os_handler = OSAccess()
     deferred: dict[Any, tuple[BaseTool, dict[str, Any]]] = {}
     executed_any = False
-    host_calls = resume.host_calls if resume is not None else 0
-    stdout_prefix = resume.stdout if resume is not None else ""
-    interrupts_answered = (
-        resume.interrupts_answered if resume is not None else 0
+    host_calls, stdout_prefix, interrupts_answered, pending_answer = _init_pass_state(
+        resume
     )
-    # Tracks whether the first FunctionSnapshot is the re-invoked interrupted call.
-    pending_answer = resume is not None
 
     try:
         if resume is not None:
@@ -634,14 +660,10 @@ def _sync_pass(
                     if cid in deferred:
                         tool, kwargs = deferred.pop(cid)
                         executed_any = True
-                        results[cid] = invoke_host_tool_sync(
-                            tool, kwargs, runtime
-                        )
+                        results[cid] = invoke_host_tool_sync(tool, kwargs, runtime)
                     else:
                         results[cid] = make_exception_result(
-                            RuntimeError(
-                                f"no deferred host call for id {cid}"
-                            )
+                            RuntimeError(f"no deferred host call for id {cid}")
                         )
                 progress = progress.resume(results, os=os_handler)
                 continue
@@ -670,14 +692,10 @@ def _sync_pass(
             tool_kwargs = _normalize_call_args(progress, tool)
             if defer:
                 deferred[progress.call_id] = (tool, tool_kwargs)
-                progress = progress.resume(
-                    {"future": ...}, os=os_handler
-                )
+                progress = progress.resume({"future": ...}, os=os_handler)
             else:
                 try:
-                    payload = invoke_host_tool_sync(
-                        tool, tool_kwargs, runtime
-                    )
+                    payload = invoke_host_tool_sync(tool, tool_kwargs, runtime)
                 except GraphInterrupt:
                     # Dump paused VM (not yet resumed) so LangGraph replay
                     # can continue from here. host_calls - 1: interrupted call
@@ -701,11 +719,7 @@ def _sync_pass(
             raise _UnawaitedHostCalls from None
         raise
 
-    if deferred:
-        if executed_any:
-            return _mixed_style_result()
-        raise _UnawaitedHostCalls
-    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
+    return _finish_pass(deferred, executed_any, progress, stdout, stdout_prefix)
 
 
 async def _drive_async(
@@ -719,13 +733,21 @@ async def _drive_async(
     """Async driver: deferred pass, then eager rerun if needed."""
     try:
         return await _async_pass(
-            monty, host_tools, runtime,
-            defer=True, limits=limits, iteration_budget=iteration_budget,
+            monty,
+            host_tools,
+            runtime,
+            defer=True,
+            limits=limits,
+            iteration_budget=iteration_budget,
         )
     except _UnawaitedHostCalls:
         return await _async_pass(
-            monty, host_tools, runtime,
-            defer=False, limits=limits, iteration_budget=iteration_budget,
+            monty,
+            host_tools,
+            runtime,
+            defer=False,
+            limits=limits,
+            iteration_budget=iteration_budget,
         )
 
 
@@ -745,17 +767,16 @@ async def _async_pass(
     1. ``FutureSnapshot`` batches run concurrently via ``asyncio.gather``.
     2. Blocking Rust VM steps are offloaded to a worker thread via
        ``asyncio.to_thread`` to avoid freezing the event loop.
+
+    Mirror of ``_sync_pass``; keep the two in sync when changing the protocol.
     """
     stdout = CollectString()
     os_handler = OSAccess()
     deferred: dict[Any, tuple[BaseTool, dict[str, Any]]] = {}
     executed_any = False
-    host_calls = resume.host_calls if resume is not None else 0
-    stdout_prefix = resume.stdout if resume is not None else ""
-    interrupts_answered = (
-        resume.interrupts_answered if resume is not None else 0
+    host_calls, stdout_prefix, interrupts_answered, pending_answer = _init_pass_state(
+        resume
     )
-    pending_answer = resume is not None
 
     try:
         if resume is not None:
@@ -775,9 +796,7 @@ async def _async_pass(
             )
         while not isinstance(progress, MontyComplete):
             if isinstance(progress, NameLookupSnapshot):
-                progress = await asyncio.to_thread(
-                    progress.resume, os=os_handler
-                )
+                progress = await asyncio.to_thread(progress.resume, os=os_handler)
                 continue
 
             if isinstance(progress, FutureSnapshot):
@@ -834,9 +853,7 @@ async def _async_pass(
                 )
             else:
                 try:
-                    payload = await invoke_host_tool_async(
-                        tool, tool_kwargs, runtime
-                    )
+                    payload = await invoke_host_tool_async(tool, tool_kwargs, runtime)
                 except GraphInterrupt:
                     await _apersist_hitl_record(
                         runtime,
@@ -857,9 +874,4 @@ async def _async_pass(
             raise _UnawaitedHostCalls from None
         raise
 
-    if deferred:
-        if executed_any:
-            return _mixed_style_result()
-        raise _UnawaitedHostCalls
-    return _complete_result(progress, stdout, stdout_prefix=stdout_prefix)
-
+    return _finish_pass(deferred, executed_any, progress, stdout, stdout_prefix)
