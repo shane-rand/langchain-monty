@@ -1,45 +1,51 @@
-# --------------------------------------------------------------------------- #
-# Host-tool invocation bridge                                                 #
-# --------------------------------------------------------------------------- #
-#
-# LangChain tools come in two flavours of input:
-#
-#   tool.invoke({"query": "x"})                      # bare-args dict
-#   tool.invoke({"name": ..., "args": ..., "id": ..., "type": "tool_call"})
-#
-# Only the second (a full ToolCall) makes LangChain populate injected
-# parameters like InjectedToolCallId, and only explicit values in args
-# satisfy a `runtime: ToolRuntime` / InjectedState parameter. Tools from
-# deepagents' FilesystemMiddleware (read_file, ls, ...) REQUIRE a runtime to
-# reach graph state, so invoking them with a bare dict fails validation.
-#
-# The bridge therefore always builds a full ToolCall and forwards the live
-# ToolRuntime (and its state/store) into any injected slot the tool
-# declares. The sandbox can never forge these values: interpreter-supplied
-# kwargs matching injected names are stripped in _normalize_call_args BEFORE
-# this code adds the real ones.
+"""Host-tool invocation bridge.
+
+LangChain tools come in two flavours of input::
+
+    tool.invoke({"query": "x"})                      # bare-args dict
+    tool.invoke({"name": ..., "args": ..., "id": ..., "type": "tool_call"})
+
+Only the second (a full ToolCall) makes LangChain populate injected
+parameters like InjectedToolCallId, and only explicit values in args
+satisfy a ``runtime: ToolRuntime`` / InjectedState parameter. Tools from
+deepagents' FilesystemMiddleware (read_file, ls, ...) REQUIRE a runtime to
+reach graph state, so invoking them with a bare dict fails validation.
+
+The bridge therefore always builds a full ToolCall and forwards the live
+ToolRuntime (and its state/store) into any injected slot the tool declares.
+The sandbox can never forge these values: interpreter-supplied kwargs
+matching injected names are stripped in _normalize_call_args BEFORE this
+code adds the real ones.
+"""
 
 import uuid
+from typing import Any
+
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime
-from langgraph.types import Command
 from langchain_core.tools import BaseTool
-from typing import Any
 from langgraph.errors import GraphInterrupt
+from langgraph.types import Command
 from pydantic_monty import ExternalResult
 
-from langchain_monty.helpers import deserialize_return_value, make_exception_result, make_return_value_result
+from langchain_monty.helpers import (
+    deserialize_return_value,
+    make_exception_result,
+    make_return_value_result,
+)
 
+INJECTED_PARAM_NAMES: frozenset[str] = frozenset(
+    {
+        "runtime",  # ToolRuntime
+        "state",  # InjectedState (legacy)
+        "store",  # InjectedStore
+        "tool_call_id",  # InjectedToolCallId
+        "config",  # RunnableConfig injection
+        "context",  # langgraph Context (legacy)
+        "stream_writer",  # injected from ToolRuntime
+    }
+)
 
-INJECTED_PARAM_NAMES: frozenset[str] = frozenset({
-    "runtime",  # ToolRuntime
-    "state",  # InjectedState (legacy)
-    "store",  # InjectedStore
-    "tool_call_id",  # InjectedToolCallId
-    "config",  # RunnableConfig injection
-    "context",  # langgraph Context (legacy)
-    "stream_writer",  # injected from ToolRuntime
-})
 
 def _injected_args_for(tool: BaseTool, runtime: ToolRuntime) -> dict[str, Any]:
     """Values for the tool's injected parameters, sourced from the live runtime.

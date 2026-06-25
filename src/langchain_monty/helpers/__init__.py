@@ -1,12 +1,9 @@
-# --------------------------------------------------------------------------- #
-# Monty payload helpers                                                       #
-# --------------------------------------------------------------------------- #
-
+"""Monty payload helpers."""
 
 import json
 from typing import Any
-from pydantic_monty import ExternalResult
-from pydantic_monty import MontyComplete
+
+from pydantic_monty import ExternalResult, MontyComplete
 
 
 def make_return_value_result(value: Any) -> ExternalResult:
@@ -72,4 +69,3 @@ def deserialize_return_value(value: Any) -> Any:
         except (json.JSONDecodeError, ValueError):
             return value
     return value
-

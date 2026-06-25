@@ -149,7 +149,7 @@ async def _adelete_hitl_record(runtime: ToolRuntime) -> None:
 
 
 def _burn_answered_interrupts(count: int) -> None:
-    """Advance LangGraph's positional interrupt counter past already-answered interrupts.
+    """Advance LangGraph's positional interrupt counter past answered interrupts.
 
     ``interrupt()`` matches resume values positionally. A snapshot-resumed run
     skips host tools that already ran, so without this correction the
