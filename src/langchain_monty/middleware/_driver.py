@@ -3,15 +3,10 @@
 ``_MontyDriver`` wraps the Monty VM execution boundary: constructing the
 interpreter, stepping it through ``FunctionSnapshot`` / ``FutureSnapshot`` /
 ``NameLookupSnapshot`` dispatch, bridging host-tool calls, and persisting/
-reviving the VM across a ``GraphInterrupt`` (HITL replay). The four values
-that travel together through every step — host tools, runtime, limits, and
-the iteration budget — live as instance state instead of being threaded
-through a chain of free functions.
+reviving the VM across a ``GraphInterrupt`` (HITL replay).
 
-The sync and async paths are near-mirror twins (``_drive_sync``/``_pass_sync``
-vs ``_drive_async``/``_pass_async``); keep the two in sync when changing the
-protocol. The async path differs in exactly two ways: ``FutureSnapshot``
-batches run concurrently via ``asyncio.gather``, and blocking Rust VM steps
+The async path differs in two ways: ``FutureSnapshot`` batches run concurrently 
+via ``asyncio.gather``, and blocking Rust VM steps
 are offloaded to a worker thread via ``asyncio.to_thread``.
 """
 
