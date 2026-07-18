@@ -7,9 +7,7 @@ This guide provides a quick overview for getting started with the Monty code int
 
 ## Overview
 
-`MontyCodeInterpreterMiddleware` adds an `eval_python` tool to your agent, backed by [pydantic-monty](https://github.com/pydantic/monty) — Pydantic's Rust-implemented, sandboxed Python interpreter. The interpreter starts in microseconds, runs in-process, and has no access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist.
-
-This is the Python analog of `langchain-quickjs`, which does the same thing with a QuickJS JavaScript VM.
+`MontyCodeInterpreterMiddleware` adds an `eval_python` tool to your agent, backed by [pydantic-monty](https://github.com/pydantic/monty), Pydantic's Rust-implemented, sandboxed Python interpreter. The interpreter starts in microseconds, runs in-process, and has no access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist.
 
 ### Details
 
@@ -31,7 +29,7 @@ This is the Python analog of `langchain-quickjs`, which does the same thing with
 
 ## Setup
 
-The middleware runs entirely in-process — there is no external service, so no account or API key is required.
+The middleware runs entirely in-process. There is no external service, so no account or API key is required.
 
 It's helpful (but not required) to set up LangSmith for observability and <Tooltip tip="Log each step of a model's execution to debug and improve it">tracing</Tooltip>. To enable automated tracing, set your [LangSmith](/langsmith/observability) API key:
 
