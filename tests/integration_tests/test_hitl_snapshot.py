@@ -32,12 +32,22 @@ from langgraph.types import Command, interrupt
 
 from langchain_monty import MontyCodeInterpreterMiddleware
 
-# --------------------------------------------------------------------------- #
-# Helpers                                                                     #
-# --------------------------------------------------------------------------- #
-
 _NAMESPACE = ("langchain_monty", "snapshots", "thread-1")
 _TOOL_CALL_ID = "eval-call-1"
+
+
+def _sync_call(m: MontyCodeInterpreterMiddleware, **kwargs: Any) -> Any:
+    """Call eval_python's sync function directly, bypassing ToolNode."""
+    func = m._tool.func
+    assert func is not None
+    return func(**kwargs)
+
+
+async def _async_call(m: MontyCodeInterpreterMiddleware, **kwargs: Any) -> Any:
+    """Call eval_python's async function directly, bypassing ToolNode."""
+    coroutine = m._tool.coroutine
+    assert coroutine is not None
+    return await coroutine(**kwargs)
 
 
 def _hitl_runtime(store=None) -> ToolRuntime:
@@ -92,11 +102,6 @@ def _gated_tool(name: str = "gated"):
     return gated, state
 
 
-# --------------------------------------------------------------------------- #
-# Unit level: simulated interrupt/replay against the tool function            #
-# --------------------------------------------------------------------------- #
-
-
 class TestSnapshotResumeUnit:
     CODE = 'track("a")\ngated("x")["ok"]'
 
@@ -109,12 +114,12 @@ class TestSnapshotResumeUnit:
         store = InMemoryStore()
 
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=self.CODE, runtime=_hitl_runtime(store))
+            _sync_call(m, code=self.CODE, runtime=_hitl_runtime(store))
         assert calls == ["a"]
         assert store.get(_NAMESPACE, _TOOL_CALL_ID) is not None
 
         gate["approved"] = True
-        r = m._tool.func(code=self.CODE, runtime=_hitl_runtime(store))
+        r = _sync_call(m, code=self.CODE, runtime=_hitl_runtime(store))
 
         assert r["error"] is None
         assert r["result"] == "x"
@@ -132,7 +137,7 @@ class TestSnapshotResumeUnit:
 
         code = 'print("before")\ntrack("a")\ngated("x")'
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=code, runtime=_hitl_runtime(store))
+            _sync_call(m, code=code, runtime=_hitl_runtime(store))
 
         rec = store.get(_NAMESPACE, _TOOL_CALL_ID).value
         assert rec["stdout"] == "before\n"
@@ -150,10 +155,10 @@ class TestSnapshotResumeUnit:
 
         code = 'print("before")\ntrack("a")\ngated("x")\nprint("after")\n42'
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=code, runtime=_hitl_runtime(store))
+            _sync_call(m, code=code, runtime=_hitl_runtime(store))
 
         gate["approved"] = True
-        r = m._tool.func(code=code, runtime=_hitl_runtime(store))
+        r = _sync_call(m, code=code, runtime=_hitl_runtime(store))
         assert r["error"] is None
         assert r["result"] == 42
         # "before" printed pre-interrupt exactly once, "after" post-resume.
@@ -169,11 +174,11 @@ class TestSnapshotResumeUnit:
 
         code = 'track("a")\ntrack("b")\ngated("x")["ok"]'
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=code, runtime=_hitl_runtime(store))
+            _sync_call(m, code=code, runtime=_hitl_runtime(store))
         assert store.get(_NAMESPACE, _TOOL_CALL_ID).value["host_calls"] == 2
 
         gate["approved"] = True
-        r = m._tool.func(code=code, runtime=_hitl_runtime(store))
+        r = _sync_call(m, code=code, runtime=_hitl_runtime(store))
         assert r["error"] is None
         assert r["result"] == "x"
 
@@ -185,9 +190,9 @@ class TestSnapshotResumeUnit:
         m = MontyCodeInterpreterMiddleware(ptc=[track, gated])
 
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=self.CODE, runtime=_hitl_runtime(store=None))
+            _sync_call(m, code=self.CODE, runtime=_hitl_runtime(store=None))
         gate["approved"] = True
-        r = m._tool.func(code=self.CODE, runtime=_hitl_runtime(store=None))
+        r = _sync_call(m, code=self.CODE, runtime=_hitl_runtime(store=None))
 
         assert r["error"] is None
         assert r["result"] == "x"
@@ -210,12 +215,12 @@ class TestSnapshotResumeUnit:
 
         code = 'track("a")\ngate1("x")\ngate2("y")["ok"]'
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=code, runtime=_hitl_runtime(store))
+            _sync_call(m, code=code, runtime=_hitl_runtime(store))
         assert store.get(_NAMESPACE, _TOOL_CALL_ID).value["interrupts_answered"] == 0
 
         gate1["approved"] = True
         with pytest.raises(GraphInterrupt):
-            m._tool.func(code=code, runtime=_hitl_runtime(store))
+            _sync_call(m, code=code, runtime=_hitl_runtime(store))
 
         rec = store.get(_NAMESPACE, _TOOL_CALL_ID).value
         # gate1's answer was consumed by its successful re-invocation; the
@@ -232,12 +237,12 @@ class TestSnapshotResumeUnit:
         store = InMemoryStore()
 
         with pytest.raises(GraphInterrupt):
-            await m._tool.coroutine(code=self.CODE, runtime=_hitl_runtime(store))
+            await _async_call(m, code=self.CODE, runtime=_hitl_runtime(store))
         assert calls == ["a"]
         assert store.get(_NAMESPACE, _TOOL_CALL_ID) is not None
 
         gate["approved"] = True
-        r = await m._tool.coroutine(code=self.CODE, runtime=_hitl_runtime(store))
+        r = await _async_call(m, code=self.CODE, runtime=_hitl_runtime(store))
 
         assert r["error"] is None
         assert r["result"] == "x"
@@ -253,17 +258,12 @@ class TestSnapshotResumeUnit:
 
         code = 'print("before")\ntrack("a")\ngated("x")\nprint("after")\n42'
         with pytest.raises(GraphInterrupt):
-            await m._tool.coroutine(code=code, runtime=_hitl_runtime(store))
+            await _async_call(m, code=code, runtime=_hitl_runtime(store))
 
         gate["approved"] = True
-        r = await m._tool.coroutine(code=code, runtime=_hitl_runtime(store))
+        r = await _async_call(m, code=code, runtime=_hitl_runtime(store))
         assert r["error"] is None
         assert r["stdout"] == "before\nafter\n"
-
-
-# --------------------------------------------------------------------------- #
-# End to end: real graph, real interrupt(), counter burn                      #
-# --------------------------------------------------------------------------- #
 
 
 class _FakeModel(BaseChatModel):

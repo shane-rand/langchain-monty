@@ -34,10 +34,6 @@ from langchain_monty import (
     MontyLimits,
 )
 
-# --------------------------------------------------------------------------- #
-# Fake model (same pattern as test_integration.py)                            #
-# --------------------------------------------------------------------------- #
-
 
 class _FakeModel(BaseChatModel):
     responses: list[AIMessage]
@@ -60,11 +56,6 @@ class _FakeModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "fake-tool-capable-model"
-
-
-# --------------------------------------------------------------------------- #
-# Helpers                                                                      #
-# --------------------------------------------------------------------------- #
 
 
 def _eval_call(code: str) -> AIMessage:
@@ -108,11 +99,6 @@ def _run(code: str, middleware=None) -> dict:
     return _tool_result(result)
 
 
-# --------------------------------------------------------------------------- #
-# Stdout capture                                                               #
-# --------------------------------------------------------------------------- #
-
-
 class TestStdoutCapture:
     def test_print_captured_in_stdout_field(self):
         r = _run('print("hello")')
@@ -140,11 +126,6 @@ class TestStdoutCapture:
     def test_print_integer_captured(self):
         r = _run("print(123)")
         assert "123" in r["stdout"]
-
-
-# --------------------------------------------------------------------------- #
-# Result structure                                                              #
-# --------------------------------------------------------------------------- #
 
 
 class TestResultStructure:
@@ -191,11 +172,6 @@ class TestResultStructure:
         assert r["error"] is not None
         assert len(r["error"]["type"]) > 0
         assert len(r["error"]["message"]) > 0
-
-
-# --------------------------------------------------------------------------- #
-# Expression types                                                             #
-# --------------------------------------------------------------------------- #
 
 
 class TestExpressionTypes:
@@ -268,11 +244,6 @@ class TestExpressionTypes:
     def test_max_builtin(self):
         r = _run("max(10, 20, 5)")
         assert r["result"] == 20
-
-
-# --------------------------------------------------------------------------- #
-# PTC — non-integer return types                                               #
-# --------------------------------------------------------------------------- #
 
 
 class TestPtcReturnTypes:
@@ -352,11 +323,6 @@ class TestPtcReturnTypes:
         assert r["result"] == 32
 
 
-# --------------------------------------------------------------------------- #
-# PTC — exception handling                                                     #
-# --------------------------------------------------------------------------- #
-
-
 class TestPtcExceptionHandling:
     def test_tool_exception_caught_by_interpreter(self):
         @tool
@@ -398,11 +364,6 @@ class TestPtcExceptionHandling:
         )
         r = _tool_result(agent.invoke({"messages": [{"role": "user", "content": "go"}]}))
         assert r["error"] is not None
-
-
-# --------------------------------------------------------------------------- #
-# Iteration budget                                                             #
-# --------------------------------------------------------------------------- #
 
 
 class TestIterationBudget:
@@ -466,11 +427,6 @@ class TestIterationBudget:
         assert r["error"] is None
 
 
-# --------------------------------------------------------------------------- #
-# Deferred (string-name) PTC                                                  #
-# --------------------------------------------------------------------------- #
-
-
 class TestDeferredPtc:
     def test_deferred_name_resolves_from_runtime_tools(self):
         @tool
@@ -512,11 +468,6 @@ class TestDeferredPtc:
         assert r["result"] == 20  # 13 + 7
 
 
-# --------------------------------------------------------------------------- #
-# Multiple sequential eval_python calls                                       #
-# --------------------------------------------------------------------------- #
-
-
 class TestMultipleEvalCalls:
     def test_two_eval_calls_both_succeed(self):
         agent = _agent(
@@ -544,11 +495,6 @@ class TestMultipleEvalCalls:
         assert r1["error"] is None
 
 
-# --------------------------------------------------------------------------- #
-# Custom tool_description                                                      #
-# --------------------------------------------------------------------------- #
-
-
 class TestCustomToolDescription:
     def test_custom_description_does_not_break_execution(self):
         custom_desc = "Custom description. {available_host_tools}"
@@ -568,11 +514,6 @@ class TestCustomToolDescription:
         # The tool description template is stored internally; verify the public
         # constant is non-empty and used as the fallback.
         assert len(CODE_INTERPRETER_TOOL_DESCRIPTION) > 0
-
-
-# --------------------------------------------------------------------------- #
-# Async — extended coverage                                                    #
-# --------------------------------------------------------------------------- #
 
 
 class TestAsyncExtended:

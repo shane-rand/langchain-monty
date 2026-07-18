@@ -8,10 +8,6 @@ from langchain_monty import (
     MontyLimits,
 )
 
-# --------------------------------------------------------------------------- #
-# Helpers                                                                     #
-# --------------------------------------------------------------------------- #
-
 
 def _make_request(system_message=None):
     req = MagicMock()
@@ -34,11 +30,6 @@ def _make_base_tool(name, args=None, description=None):
     t.args = args or {}
     t.description = description or f"{name} tool description"
     return t
-
-
-# --------------------------------------------------------------------------- #
-# Initialisation                                                               #
-# --------------------------------------------------------------------------- #
 
 
 class TestInit:
@@ -101,11 +92,6 @@ class TestInit:
         assert "Custom prompt" in (m.system_prompt or "")
 
 
-# --------------------------------------------------------------------------- #
-# wrap_model_call                                                              #
-# --------------------------------------------------------------------------- #
-
-
 class TestWrapModelCall:
     def test_calls_handler_directly_when_no_system_prompt(self):
         m = MontyCodeInterpreterMiddleware(system_prompt=None)
@@ -135,11 +121,6 @@ class TestWrapModelCall:
         handler.assert_called_once_with(overridden)
 
 
-# --------------------------------------------------------------------------- #
-# awrap_model_call                                                             #
-# --------------------------------------------------------------------------- #
-
-
 class TestAwrapModelCall:
     @pytest.mark.asyncio
     async def test_calls_handler_directly_when_no_system_prompt(self):
@@ -161,14 +142,11 @@ class TestAwrapModelCall:
         handler.assert_awaited_once_with(overridden)
 
 
-# --------------------------------------------------------------------------- #
-# eval_python tool -- sync driver                                              #
-# --------------------------------------------------------------------------- #
-
-
 class TestEvalPythonSync:
     def _invoke(self, middleware, code, runtime):
-        return middleware._tool.func(code=code, runtime=runtime)
+        func = middleware._tool.func
+        assert func is not None
+        return func(code=code, runtime=runtime)
 
     def test_simple_completion(self):
         from pydantic_monty import CollectString, MontyComplete
@@ -508,11 +486,6 @@ class TestEvalPythonSync:
             assert "return_value" not in call[0][0]
 
 
-# --------------------------------------------------------------------------- #
-# eval_python tool -- async driver                                             #
-# --------------------------------------------------------------------------- #
-
-
 class TestEvalPythonAsync:
     """The async entrypoint builds the interpreter via ``Monty.acreate`` (so
     parsing/type-checking happens off the event loop), which is why these
@@ -521,7 +494,9 @@ class TestEvalPythonAsync:
     """
 
     async def _invoke(self, middleware, code, runtime):
-        return await middleware._tool.coroutine(code=code, runtime=runtime)
+        coroutine = middleware._tool.coroutine
+        assert coroutine is not None
+        return await coroutine(code=code, runtime=runtime)
 
     @pytest.mark.asyncio
     async def test_compile_error_returns_structured_error(self):
@@ -570,11 +545,6 @@ class TestEvalPythonAsync:
         assert result["error"] is None
 
 
-# --------------------------------------------------------------------------- #
-# eval_python tool -- async driver: FutureSnapshot / gather path              #
-# --------------------------------------------------------------------------- #
-
-
 class TestEvalPythonAsyncGather:
     """Tests for the deferred-FunctionSnapshot + concurrent-FutureSnapshot path.
 
@@ -584,7 +554,9 @@ class TestEvalPythonAsyncGather:
     """
 
     async def _invoke(self, middleware, code, runtime):
-        return await middleware._tool.coroutine(code=code, runtime=runtime)
+        coroutine = middleware._tool.coroutine
+        assert coroutine is not None
+        return await coroutine(code=code, runtime=runtime)
 
     def _make_function_snap(self, name, call_id, kwargs=None):
         from pydantic_monty import FunctionSnapshot

@@ -20,10 +20,6 @@ from langchain_core.tools import tool
 
 from langchain_monty import MontyCodeInterpreterMiddleware, MontyLimits
 
-# --------------------------------------------------------------------------- #
-# Fake model                                                                  #
-# --------------------------------------------------------------------------- #
-
 
 class _FakeModel(BaseChatModel):
     """Minimal fake chat model that cycles through pre-configured responses.
@@ -52,11 +48,6 @@ class _FakeModel(BaseChatModel):
     @property
     def _llm_type(self) -> str:
         return "fake-tool-capable-model"
-
-
-# --------------------------------------------------------------------------- #
-# Helpers                                                                     #
-# --------------------------------------------------------------------------- #
 
 
 def _eval_call(code: str) -> AIMessage:
@@ -88,11 +79,6 @@ def _tool_result(agent_result: dict) -> dict:
     return json.loads(agent_result["messages"][2].content)
 
 
-# --------------------------------------------------------------------------- #
-# Agent creation                                                               #
-# --------------------------------------------------------------------------- #
-
-
 class TestAgentCreation:
     def test_returns_compiled_state_graph(self):
         from langgraph.graph.state import CompiledStateGraph
@@ -119,11 +105,6 @@ class TestAgentCreation:
         a1 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=[x]))
         a2 = _agent(_done(), middleware=MontyCodeInterpreterMiddleware(ptc=[y]))
         assert a1 is not a2
-
-
-# --------------------------------------------------------------------------- #
-# eval_python — expression evaluation                                          #
-# --------------------------------------------------------------------------- #
 
 
 class TestExpressionEvaluation:
@@ -159,11 +140,6 @@ class TestExpressionEvaluation:
         assert r["result"] == 12
 
 
-# --------------------------------------------------------------------------- #
-# eval_python — error handling                                                 #
-# --------------------------------------------------------------------------- #
-
-
 class TestErrorHandling:
     def _run(self, code: str) -> dict:
         agent = _agent(_eval_call(code), _done())
@@ -194,11 +170,6 @@ class TestErrorHandling:
     def test_result_is_null_on_error(self):
         r = self._run("???")
         assert r["result"] is None
-
-
-# --------------------------------------------------------------------------- #
-# Programmatic tool calling (ptc)                                              #
-# --------------------------------------------------------------------------- #
 
 
 class TestPtcHostToolCalling:
@@ -255,11 +226,6 @@ class TestPtcHostToolCalling:
         assert r.get("result") != 99
 
 
-# --------------------------------------------------------------------------- #
-# System prompt configuration                                                  #
-# --------------------------------------------------------------------------- #
-
-
 class TestSystemPromptConfig:
     def test_default_system_prompt_agent_works(self):
         agent = _agent(_done("ok"))
@@ -283,11 +249,6 @@ class TestSystemPromptConfig:
         result = agent.invoke({"messages": [{"role": "user", "content": "go"}]})
         r = _tool_result(result)
         assert r["result"] == 15
-
-
-# --------------------------------------------------------------------------- #
-# Custom limits                                                                #
-# --------------------------------------------------------------------------- #
 
 
 class TestCustomLimits:
@@ -314,11 +275,6 @@ class TestCustomLimits:
         r = _tool_result(result)
         assert r["result"] == 2
         assert r["error"] is None
-
-
-# --------------------------------------------------------------------------- #
-# Async invocation                                                             #
-# --------------------------------------------------------------------------- #
 
 
 class TestAsyncInvocation:

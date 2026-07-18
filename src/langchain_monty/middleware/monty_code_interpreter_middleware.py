@@ -175,7 +175,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         self._tool = self._build_eval_python_tool()
         self.tools: Sequence[BaseTool] = [self._tool]
 
-    def _build_eval_python_tool(self) -> BaseTool:
+    def _build_eval_python_tool(self) -> StructuredTool:
         ptc = self._ptc
         ptc_tools = self._ptc_tools
         limits = self._limits

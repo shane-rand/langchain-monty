@@ -25,11 +25,6 @@ from langchain_monty.middleware.monty_code_interpreter_middleware import (
 from langchain_monty.models import MontyLimits
 
 
-# ---------------------------------------------------------------------------
-# _format_limit
-# ---------------------------------------------------------------------------
-
-
 class TestFormatLimit:
     def test_none_returns_unlimited(self):
         assert _format_limit(None) == "unlimited"
@@ -40,11 +35,6 @@ class TestFormatLimit:
 
     def test_zero_returned_as_is(self):
         assert _format_limit(0) == 0
-
-
-# ---------------------------------------------------------------------------
-# _iteration_budget_result
-# ---------------------------------------------------------------------------
 
 
 class TestIterationBudgetResult:
@@ -59,11 +49,6 @@ class TestIterationBudgetResult:
     def test_no_result_key(self):
         result = _iteration_budget_result(64)
         assert result.get("result") is None
-
-
-# ---------------------------------------------------------------------------
-# _error_result
-# ---------------------------------------------------------------------------
 
 
 class TestErrorResult:
@@ -113,11 +98,6 @@ class TestErrorResult:
         assert result["error"]["message"] == "SyntaxError: unexpected EOF"
 
 
-# ---------------------------------------------------------------------------
-# _complete_result
-# ---------------------------------------------------------------------------
-
-
 class TestCompleteResult:
     def _make_progress(self, output=None):
         progress = MagicMock()
@@ -148,11 +128,6 @@ class TestCompleteResult:
         assert result["stdout"] == "pre:"
 
 
-# ---------------------------------------------------------------------------
-# _allowlist_rejection
-# ---------------------------------------------------------------------------
-
-
 class TestAllowlistRejection:
     def test_returns_exc_type_key(self):
         result = _allowlist_rejection("secret_tool", {})
@@ -169,11 +144,6 @@ class TestAllowlistRejection:
         assert "read_file" in result["message"]
 
 
-# ---------------------------------------------------------------------------
-# _mixed_style_result
-# ---------------------------------------------------------------------------
-
-
 class TestMixedStyleResult:
     def test_returns_error_type(self):
         result = _mixed_style_result()
@@ -182,11 +152,6 @@ class TestMixedStyleResult:
     def test_message_explains_the_issue(self):
         result = _mixed_style_result()
         assert "await" in result["error"]["message"].lower()
-
-
-# ---------------------------------------------------------------------------
-# _resolve_host_tools
-# ---------------------------------------------------------------------------
 
 
 class TestResolveHostTools:
@@ -260,11 +225,6 @@ class TestResolveHostTools:
         assert result["search"] is pre
 
 
-# ---------------------------------------------------------------------------
-# _compile_kwargs
-# ---------------------------------------------------------------------------
-
-
 class TestCompileKwargs:
     def test_type_check_disabled_returns_empty(self):
         result = _compile_kwargs({}, type_check_enabled=False, ptc=frozenset())
@@ -274,11 +234,6 @@ class TestCompileKwargs:
         result = _compile_kwargs({}, type_check_enabled=True, ptc=frozenset())
         assert result.get("type_check") is True
         assert "type_check_stubs" in result
-
-
-# ---------------------------------------------------------------------------
-# _render_description
-# ---------------------------------------------------------------------------
 
 
 class TestRenderDescription:
