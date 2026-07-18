@@ -20,10 +20,6 @@ from langgraph.types import Command
 
 from langchain_monty import MontyCodeInterpreterMiddleware
 
-# --------------------------------------------------------------------------- #
-# Helpers                                                                     #
-# --------------------------------------------------------------------------- #
-
 
 def _runtime(tools=None, state=None) -> ToolRuntime:
     """A real ToolRuntime, as the agent's ToolNode would inject it."""
@@ -40,12 +36,16 @@ def _runtime(tools=None, state=None) -> ToolRuntime:
 
 def _run(middleware: MontyCodeInterpreterMiddleware, code: str, **rt_kwargs):
     """Invoke the sync eval_python entrypoint directly."""
-    return middleware._tool.func(code=code, runtime=_runtime(**rt_kwargs))
+    func = middleware._tool.func
+    assert func is not None
+    return func(code=code, runtime=_runtime(**rt_kwargs))
 
 
 async def _arun(middleware: MontyCodeInterpreterMiddleware, code: str, **rt_kwargs):
     """Invoke the async eval_python entrypoint directly."""
-    return await middleware._tool.coroutine(code=code, runtime=_runtime(**rt_kwargs))
+    coroutine = middleware._tool.coroutine
+    assert coroutine is not None
+    return await coroutine(code=code, runtime=_runtime(**rt_kwargs))
 
 
 @tool
@@ -55,11 +55,6 @@ def lookup(key: str) -> str:
     Returns a JSON object with: key (str), value (int).
     """
     return json.dumps({"key": key, "value": len(key)})
-
-
-# --------------------------------------------------------------------------- #
-# Static type checking against generated stubs                                #
-# --------------------------------------------------------------------------- #
 
 
 class TestTypeChecking:
@@ -121,11 +116,6 @@ class TestTypeChecking:
         assert r["error"]["type"] != "TypeCheckError"
 
 
-# --------------------------------------------------------------------------- #
-# Injected-argument forwarding (ToolRuntime / InjectedState / tool_call_id)   #
-# --------------------------------------------------------------------------- #
-
-
 class TestInjectedArgForwarding:
     def test_runtime_requiring_tool_works_through_bridge(self):
         """Tools that declare ``runtime: ToolRuntime`` (e.g. deepagents
@@ -177,11 +167,6 @@ class TestInjectedArgForwarding:
         assert r["result"].startswith("7:eval_python:")
 
 
-# --------------------------------------------------------------------------- #
-# GraphInterrupt propagation (human-in-the-loop)                              #
-# --------------------------------------------------------------------------- #
-
-
 class TestGraphInterrupt:
     def test_interrupt_propagates_out_of_eval_python_sync(self):
         """GraphInterrupt must NOT become a sandbox/structured error — it has
@@ -207,10 +192,6 @@ class TestGraphInterrupt:
         with pytest.raises(GraphInterrupt):
             await _arun(m, 'sensitive("delete")')
 
-
-# --------------------------------------------------------------------------- #
-# Call styles: plain vs awaited, in both drivers                              #
-# --------------------------------------------------------------------------- #
 
 GATHER_CODE = """\
 import asyncio
@@ -280,11 +261,6 @@ class TestCallStyles:
         assert r["error"]["type"] == "IterationBudgetExceeded"
 
 
-# --------------------------------------------------------------------------- #
-# Result/error shapes                                                         #
-# --------------------------------------------------------------------------- #
-
-
 class TestResultShapes:
     def test_non_json_native_result_uses_tagged_form(self):
         """A set can't pass through json.dumps; the fallback uses Monty's
@@ -317,11 +293,6 @@ class TestResultShapes:
         assert "Command" in r["error"]["message"]
 
 
-# --------------------------------------------------------------------------- #
-# Dynamic system-prompt rendering for deferred tools                          #
-# --------------------------------------------------------------------------- #
-
-
 class TestDeferredSchemaRendering:
     def test_deferred_schema_rendered_when_resolved_on_request(self):
         """ptc=["lookup"] starts as a bare name; once the request's tool list
@@ -331,6 +302,7 @@ class TestDeferredSchemaRendering:
 
         m = MontyCodeInterpreterMiddleware(ptc=["lookup"])
         # Bare name (no signature) in the static block...
+        assert m.system_prompt is not None
         assert "lookup" in m.system_prompt
         assert "lookup(key: string)" not in m.system_prompt
 
@@ -344,7 +316,7 @@ class TestDeferredSchemaRendering:
             return request
 
         request.override = _override
-        m.wrap_model_call(request, lambda req: "resp")
+        m.wrap_model_call(request, lambda req: request.response)
 
         rendered = captured["system_message"].text
         # ...full signature + docstring once resolved per-request.
@@ -363,7 +335,7 @@ class TestDeferredSchemaRendering:
         m = MontyCodeInterpreterMiddleware(ptc=[search])
         assert "search" in m._tool.description
         assert "A searchable index" not in m._tool.description
-        assert "A searchable index" in m.system_prompt
+        assert m.system_prompt is not None and "A searchable index" in m.system_prompt
 
     def test_schemas_fall_back_to_description_without_system_prompt(self):
         """system_prompt=None removes the prompt block, so the description
