@@ -2,7 +2,9 @@
 
 LangChain agent middleware that adds an `eval_python` tool backed by [pydantic-monty](https://github.com/pydantic/monty) — Pydantic's Rust-implemented, sandboxed Python interpreter.
 
-The interpreter starts in microseconds, runs in-process, and has zero access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist via the `ptc=` parameter.
+The interpreter runs in a pooled `monty` worker subprocess and has zero access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist via the `ptc=` parameter.
+
+Running out of process is what makes the sandbox safe to point at model-written code: a crash no memory-safe interpreter can fully rule out — stack overflow, allocator abort — kills a replaceable worker, and your process is never at risk.
 
 Works with any LangChain v1 agent (`langchain.agents.create_agent`) and with [deepagents](https://github.com/langchain-ai/deepagents) (`create_deep_agent`) — there is no runtime dependency on deepagents. This is the Python analog of `langchain-quickjs`, which does the same thing with a QuickJS JavaScript VM.
 
@@ -14,6 +16,11 @@ uv add langchain-monty
 ```
 
 Requires Python 3.12+.
+
+`pydantic-monty` pulls in `pydantic-monty-runtime`, which installs the `monty`
+binary into your environment's scripts directory. The worker pool finds it there,
+on `PATH`, or at `$MONTY_BIN` — worth knowing if you vendor dependencies, build a
+slim container image, or install with `--no-binary`.
 
 ## Quick start
 
@@ -139,7 +146,7 @@ Disable with `MontyCodeInterpreterMiddleware(type_check=False)` if Monty's check
 
 When a bridged host tool raises `GraphInterrupt` (e.g. `HumanInTheLoopMiddleware` asking for approval), the middleware re-raises it instead of feeding it into the sandbox, so LangGraph checkpoints and pauses normally. What happens on resume depends on whether the agent has a [LangGraph store](https://langchain-ai.github.io/langgraph/concepts/persistence/#memory-store):
 
-**With a store** (`create_agent(..., store=...)`), the paused Monty VM is serialized (`FunctionSnapshot.dump()`) into the store at interrupt time, keyed by the tool call id. When LangGraph replays the `eval_python` call, the snapshot is revived (`pydantic_monty.load_snapshot()`) and execution **continues from the interrupted host call**: host tools that already ran are *not* re-invoked, stdout printed before the pause is preserved, and the iteration budget keeps counting across the pause. Only the interrupted tool itself is re-invoked — its `interrupt()` then returns the recorded human answer. The snapshot record is deleted from the store when the call finishes. Multiple sequential interrupts within one snippet are supported.
+**With a store** (`create_agent(..., store=...)`), the paused Monty VM is serialized (`FunctionSnapshot.dump()`) into the store at interrupt time, keyed by the tool call id. When LangGraph replays the `eval_python` call, the snapshot is revived (`MontySession.load_snapshot()`, on a freshly checked-out session) and execution **continues from the interrupted host call**: host tools that already ran are *not* re-invoked, stdout printed before the pause is preserved, and the iteration budget keeps counting across the pause. Only the interrupted tool itself is re-invoked — its `interrupt()` then returns the recorded human answer. The snapshot record is deleted from the store when the call finishes. Multiple sequential interrupts within one snippet are supported.
 
 **Without a store**, LangGraph's plain replay model applies: on resume the whole `eval_python` call re-runs from the top, so host tools called *before* the interrupt point are re-invoked — combine HITL with idempotent tools in this mode.
 
@@ -256,15 +263,21 @@ from langchain_monty import MontyCodeInterpreterMiddleware, MontyLimits
 limits = MontyLimits(
     max_duration_secs=10.0,       # wall-clock time (default 5.0)
     max_memory_bytes=128_000_000, # heap cap (default 64 MB)
-    max_stack_depth=512,          # recursion limit (default 256)
-    max_allocations=2_000_000,    # allocation count (default 1 000 000)
+    max_stack_depth=512,          # recursion limit (default: Monty's 1000)
+    max_suspensions=2_000,        # pauses per call (default: Monty's 1000)
     gc_interval=None,             # allocations between GCs (default: Monty's)
 )
 
 middleware = MontyCodeInterpreterMiddleware(limits=limits)
 ```
 
-Naming note: `max_memory_bytes` and `max_stack_depth` map to upstream `ResourceLimits.max_memory` and `.max_recursion_depth`; `MontyLimits.to_monty()` performs the translation.
+`max_suspensions` counts every pause the sandbox makes the host answer: host-tool
+calls, OS callbacks (`pathlib`, the clock), undefined-name lookups, and future
+resolutions. It is strictly wider than `iteration_budget`, which caps host-tool
+calls alone — filesystem-heavy code can exhaust it without calling a single host
+tool. Monty's pool enforces it and aborts an over-budget run.
+
+Naming note: `max_memory_bytes` and `max_stack_depth` map to upstream `ResourceLimits.max_memory` and `.max_recursion_depth`; `MontyLimits.to_monty()` performs the translation. `max_stack_depth` and `max_suspensions` are the two fields `None` does not make unlimited — upstream refuses to disable them, so `None` leaves Monty's default of 1000 in place.
 
 ## Constructor reference
 
@@ -326,6 +339,8 @@ Not supported (yet): class definitions, real imports beyond the listed modules.
 
 The sandbox has no access to the host filesystem, network, subprocesses, or environment variables. All communication with the outside world goes through explicitly allowlisted host tools.
 
+(The middleware itself runs the VM in a worker subprocess, which is a separate matter: sandbox code can neither see nor spawn processes. Its `pathlib` calls land in an empty in-memory filesystem, and `os.getenv` in an empty environment.)
+
 ## Async support
 
 The tool is always called `eval_python`. Internally the middleware registers both a sync and an async implementation; LangChain dispatches to the async path automatically when you use `agent.ainvoke(...)`:
@@ -334,7 +349,30 @@ The tool is always called `eval_python`. Internally the middleware registers bot
 result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
 ```
 
-The async path is event-loop friendly: parsing/type-checking happens via `Monty.acreate` on a worker thread, and every VM step (`start`/`resume` are blocking Rust calls) is offloaded with `asyncio.to_thread`, so a compute-heavy snippet never stalls other coroutines in your server. Sandbox code using `asyncio.gather` over host calls gets true host-side concurrency under `ainvoke` (and falls back to sequential execution under `invoke`).
+The async path is event-loop friendly: it drives `AsyncMonty` directly, so every VM step is async IPC with the worker rather than a blocking call parked on a thread, and a compute-heavy snippet never stalls other coroutines in your server. Sandbox code using `asyncio.gather` over host calls gets true host-side concurrency under `ainvoke` (and falls back to sequential execution under `invoke`).
+
+## Upgrading to 3.0
+
+3.0 moves the package onto `pydantic-monty` 0.0.23, which restructured the interpreter
+from a single in-process extension into a client package plus a `monty` runtime binary
+that executes code in worker subprocesses. Three things change for callers:
+
+**`MontyLimits.max_allocations` is gone.** Upstream `ResourceLimits` dropped the key and
+now rejects it outright, so it could not be kept as a no-op without silently ignoring a
+limit you asked for. Use `max_suspensions` to bound how much work a single `eval_python`
+call can push back at the host, and `max_duration_secs` / `max_memory_bytes` for the caps
+it used to stand in for. Every other field is unchanged.
+
+**The `monty` binary is a real install-time artifact.** It arrives with
+`pydantic-monty-runtime` and is found in your environment's scripts directory, on `PATH`,
+or at `$MONTY_BIN`. A normal `uv add` / `pip install` needs no action; vendored
+dependencies, `--no-binary` installs and hand-built container images do.
+
+**Execution is out of process.** Startup costs a few milliseconds per call rather than
+microseconds — noise next to a model round trip — and in exchange a sandbox crash takes
+a replaceable worker with it instead of your process. The middleware's own API, the
+`eval_python` tool, its return shape, and the HITL snapshot format are unchanged; code
+that only touches `MontyCodeInterpreterMiddleware` needs no edits beyond the limits field.
 
 ## Development
 

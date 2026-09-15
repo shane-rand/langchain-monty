@@ -17,10 +17,10 @@ from langchain_monty.middleware._driver import (
     _mixed_style_result,
 )
 from langchain_monty.middleware.monty_code_interpreter_middleware import (
-    _compile_kwargs,
     _format_limit,
     _render_description,
     _resolve_host_tools,
+    _session_kwargs,
 )
 from langchain_monty.models import MontyLimits
 
@@ -225,13 +225,13 @@ class TestResolveHostTools:
         assert result["search"] is pre
 
 
-class TestCompileKwargs:
+class TestSessionKwargs:
     def test_type_check_disabled_returns_empty(self):
-        result = _compile_kwargs({}, type_check_enabled=False, ptc=frozenset())
+        result = _session_kwargs({}, type_check_enabled=False, ptc=frozenset())
         assert result == {}
 
     def test_type_check_enabled_returns_stubs(self):
-        result = _compile_kwargs({}, type_check_enabled=True, ptc=frozenset())
+        result = _session_kwargs({}, type_check_enabled=True, ptc=frozenset())
         assert result.get("type_check") is True
         assert "type_check_stubs" in result
 

@@ -7,7 +7,7 @@ This guide provides a quick overview for getting started with the Monty code int
 
 ## Overview
 
-`MontyCodeInterpreterMiddleware` adds an `eval_python` tool to your agent, backed by [pydantic-monty](https://github.com/pydantic/monty), Pydantic's Rust-implemented, sandboxed Python interpreter. The interpreter starts in microseconds, runs in-process, and has no access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist.
+`MontyCodeInterpreterMiddleware` adds an `eval_python` tool to your agent, backed by [pydantic-monty](https://github.com/pydantic/monty), Pydantic's Rust-implemented, sandboxed Python interpreter. The interpreter runs in a pooled worker subprocess and has no access to the host filesystem, network, or environment. The only way code running inside the sandbox can reach the outside world is through host tools you explicitly allowlist.
 
 ### Details
 
@@ -17,7 +17,7 @@ This guide provides a quick overview for getting started with the Monty code int
 
 ### Features
 
-- Adds an `eval_python` tool that executes Python in a sandboxed, in-process interpreter and appends a usage guide to the system prompt
+- Adds an `eval_python` tool that executes Python in a sandboxed interpreter running in a local worker subprocess, and appends a usage guide to the system prompt
 - Programmatic tool calling: allowlist LangChain tools with `ptc=` so the agent can call them as regular functions from inside the sandbox
 - Static type checking of submitted code against stubs generated from tool schemas, before anything runs
 - Human-in-the-loop support: `GraphInterrupt` from bridged tools checkpoints normally, with snapshot-based resume when a LangGraph store is available
@@ -29,7 +29,7 @@ This guide provides a quick overview for getting started with the Monty code int
 
 ## Setup
 
-The middleware runs entirely in-process. There is no external service, so no account or API key is required.
+There is no external service, so no account or API key is required — the interpreter is local, running in a `monty` worker subprocess that the package installs and manages for you.
 
 It's helpful (but not required) to set up LangSmith for observability and <Tooltip tip="Log each step of a model's execution to debug and improve it">tracing</Tooltip>. To enable automated tracing, set your [LangSmith](/langsmith/observability) API key:
 
@@ -44,6 +44,8 @@ os.environ["LANGSMITH_TRACING"] = "true"
 ### Installation
 
 The Monty code interpreter middleware lives in the `langchain-monty` package. Python 3.12+ is required.
+
+Installing it also installs `pydantic-monty-runtime`, which places the `monty` binary in your environment's scripts directory. The worker pool finds it there, on `PATH`, or at `$MONTY_BIN` — relevant only if you vendor dependencies or build a slim container image.
 
 <CodeGroup>
     ```python pip
@@ -222,13 +224,15 @@ from langchain_monty import MontyCodeInterpreterMiddleware, MontyLimits
 limits = MontyLimits(
     max_duration_secs=10.0,       # wall-clock time (default 5.0)
     max_memory_bytes=128_000_000, # heap cap (default 64 MB)
-    max_stack_depth=512,          # recursion limit (default 256)
-    max_allocations=2_000_000,    # allocation count (default 1,000,000)
+    max_stack_depth=512,          # recursion limit (default: Monty's 1000)
+    max_suspensions=2_000,        # pauses per call (default: Monty's 1000)
     gc_interval=None,             # allocations between GCs (default: Monty's)
 )
 
 middleware = MontyCodeInterpreterMiddleware(limits=limits)
 ```
+
+`max_suspensions` counts every pause the sandbox makes the host answer: host-tool calls, OS callbacks (`pathlib`, the clock), undefined-name lookups, and future resolutions. It is wider than `iteration_budget`, which caps host-tool calls alone. `max_stack_depth` and `max_suspensions` are the two fields `None` does not make unlimited — it leaves Monty's default of 1000 in place.
 
 ---
 
@@ -264,7 +268,7 @@ Monty implements a Python subset. Currently supported stdlib modules:
 
 `sys`, `os`, `typing`, `asyncio`, `re`, `datetime`, `json`, `dataclasses`
 
-Class definitions and imports beyond the listed modules are not supported yet. The sandbox has no access to the host filesystem, network, subprocesses, or environment variables — all communication with the outside world goes through explicitly allowlisted host tools.
+Class definitions and imports beyond the listed modules are not supported yet. The sandbox has no access to the host filesystem, network, subprocesses, or environment variables — all communication with the outside world goes through explicitly allowlisted host tools. (The middleware runs the VM in a worker subprocess, which is a separate matter: sandbox code can neither see nor spawn processes, its `pathlib` calls land in an empty in-memory filesystem, and `os.getenv` in an empty environment.)
 
 ---
 
@@ -276,7 +280,7 @@ The tool is always called `eval_python`. Internally the middleware registers bot
 result = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]})
 ```
 
-The async path is event-loop friendly: every VM step is offloaded to a worker thread, so a compute-heavy snippet never stalls other coroutines in your server. Sandbox code using `asyncio.gather` over host calls gets true host-side concurrency under `ainvoke`, and falls back to sequential execution under `invoke`.
+The async path is event-loop friendly: it drives Monty's async pool directly, so every VM step is async IPC with the worker rather than a blocking call parked on a thread, and a compute-heavy snippet never stalls other coroutines in your server. Sandbox code using `asyncio.gather` over host calls gets true host-side concurrency under `ainvoke`, and falls back to sequential execution under `invoke`.
 
 ---
 

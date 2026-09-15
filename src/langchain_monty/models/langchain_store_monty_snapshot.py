@@ -31,7 +31,7 @@ class LangchainStoreMontySnapshot(BaseModel):
             "Base64-encoded ``FunctionSnapshot.dump()`` bytes — the paused "
             "Monty VM, mid-way through the original run, waiting on the "
             "interrupted host call. Revived with "
-            "``pydantic_monty.load_snapshot()``."
+            "``MontySession.load_snapshot()`` on a freshly checked-out session."
         ),
     )
     stdout: str = Field(
