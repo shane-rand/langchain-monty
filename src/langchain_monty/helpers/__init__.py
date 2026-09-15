@@ -1,5 +1,6 @@
 """Monty payload helpers."""
 
+import base64
 import json
 from typing import Any
 
@@ -44,16 +45,57 @@ def jsonable_output(progress: MontyComplete) -> Any:
 
     - if ``json.dumps`` accepts the raw output, return it untouched (the
       overwhelmingly common case: None/bool/int/float/str/list/dict);
-    - otherwise fall back to Monty's ``output_json()`` "natural form": rich
-      types come back tagged, e.g. ``{"$tuple": [...]}``, ``{"$set": [...]}``
-      — lossless, self-describing, and always serializable.
+    - otherwise re-encode into a tagged "natural form": rich types come back
+      tagged, e.g. ``{"$tuple": [...]}``, ``{"$set": [...]}`` — lossless,
+      self-describing, and always serializable.
     """
     output = progress.output  # converted from VM repr on each access — grab once
     try:
         json.dumps(output)
         return output
     except (TypeError, ValueError):
-        return json.loads(progress.output_json())
+        return _tagged(output)
+
+
+def _tagged(value: Any) -> Any:
+    """Recursively re-encode a value JSON can't express into tagged form.
+
+    Monty hands back native Python objects, so the tagging happens host-side.
+    Containers are walked because the offending type is often nested (a list of
+    tuples, a dict whose values are sets). Anything unrecognized degrades to its
+    ``repr`` rather than raising — a weird result is worth more to the model than
+    a serialization failure surfacing far from here, in message encoding.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, tuple):
+        return {"$tuple": [_tagged(v) for v in value]}
+    if isinstance(value, frozenset):
+        return {"$frozenset": [_tagged(v) for v in value]}
+    if isinstance(value, set):
+        return {"$set": [_tagged(v) for v in value]}
+    if isinstance(value, (bytes, bytearray)):
+        return {"$bytes": base64.b64encode(bytes(value)).decode("ascii")}
+    if isinstance(value, list):
+        return [_tagged(v) for v in value]
+    if isinstance(value, dict):
+        if all(isinstance(key, str) for key in value):
+            return {key: _tagged(val) for key, val in value.items()}
+        # Non-string keys can't be dict keys in JSON; degrade to pairs.
+        return {"$dict": [[_tagged(k), _tagged(v)] for k, v in value.items()]}
+
+    # Dataclass instances arrive as ClassInstance / MontyClassProxy, both of
+    # which expose the same name/attributes pair.
+    name = getattr(value, "name", None)
+    attributes = getattr(value, "attributes", None)
+    if isinstance(name, str) and isinstance(attributes, dict):
+        return {
+            "$object": {
+                "name": name,
+                "attributes": {k: _tagged(v) for k, v in attributes.items()},
+            }
+        }
+    return repr(value)
 
 
 def deserialize_return_value(value: Any) -> Any:

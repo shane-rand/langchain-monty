@@ -92,19 +92,19 @@ class TestMontyLimits:
         assert lim.max_duration_secs == 5.0
         assert lim.max_memory_bytes == 64 * 1024 * 1024
         assert lim.max_stack_depth == 256
-        assert lim.max_allocations == 1_000_000
+        assert lim.max_suspensions is None
 
     def test_custom_values(self):
         lim = MontyLimits(
             max_duration_secs=10.0,
             max_memory_bytes=128,
             max_stack_depth=64,
-            max_allocations=500,
+            max_suspensions=500,
         )
         assert lim.max_duration_secs == 10.0
         assert lim.max_memory_bytes == 128
         assert lim.max_stack_depth == 64
-        assert lim.max_allocations == 500
+        assert lim.max_suspensions == 500
 
     def test_to_monty_returns_dict(self):
         lim = MontyLimits()
@@ -116,13 +116,31 @@ class TestMontyLimits:
             max_duration_secs=3.0,
             max_memory_bytes=1024,
             max_stack_depth=128,
-            max_allocations=9999,
+            max_suspensions=9999,
         )
         rl = lim.to_monty()
         assert rl["max_duration_secs"] == 3.0
         assert rl["max_memory"] == 1024
         assert rl["max_recursion_depth"] == 128
-        assert rl["max_allocations"] == 9999
+        assert rl["max_suspensions"] == 9999
+
+    def test_to_monty_accepted_by_monty(self):
+        """Every key must be one upstream ResourceLimits still recognises.
+
+        Monty rejects an unknown limits key outright, so a rename upstream
+        breaks every call rather than degrading quietly.
+        """
+        from pydantic_monty import Monty
+
+        lim = MontyLimits(max_suspensions=50)
+        with Monty(min_processes=1, max_processes=1) as pool:
+            with pool.checkout(limits=lim.to_monty()) as session:
+                assert session.feed_run("1 + 1") == 2
+
+    def test_to_monty_drops_none_fields(self):
+        rl = MontyLimits(max_duration_secs=None, max_suspensions=None).to_monty()
+        assert "max_duration_secs" not in rl
+        assert "max_suspensions" not in rl
 
     def test_frozen(self):
         lim = MontyLimits()

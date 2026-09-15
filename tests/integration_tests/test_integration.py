@@ -253,7 +253,7 @@ class TestSystemPromptConfig:
 
 class TestCustomLimits:
     def test_custom_limits_accepted_and_code_runs(self):
-        limits = MontyLimits(max_duration_secs=2.0, max_allocations=500_000)
+        limits = MontyLimits(max_duration_secs=2.0, max_suspensions=500)
         agent = _agent(
             _eval_call("sum(range(100))"),
             _done(),
@@ -265,7 +265,7 @@ class TestCustomLimits:
 
     def test_strict_limits_still_execute_simple_code(self):
         # Tight limits are stored and passed through; simple code still runs.
-        limits = MontyLimits(max_duration_secs=1.0, max_allocations=10_000)
+        limits = MontyLimits(max_duration_secs=1.0, max_suspensions=10)
         agent = _agent(
             _eval_call("1 + 1"),
             _done(),

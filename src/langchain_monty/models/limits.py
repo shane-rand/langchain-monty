@@ -15,9 +15,11 @@ class MontyLimits(BaseModel):
     Monty itself.
 
     Semantics: upstream, *omitting* a key disables that limit. We mirror
-    that by treating ``None`` as "no limit" — a ``None`` field is simply not
-    forwarded. Defaults are conservative; tune up for heavier code-mode
-    workloads, or set a field to ``None`` to lift its cap entirely.
+    that by treating ``None`` as "not forwarded" — a ``None`` field is simply
+    left out. For most fields that lifts the cap entirely. Two are exceptions
+    upstream refuses to disable: ``max_stack_depth`` and ``max_suspensions``
+    fall back to Monty's own default of 1000 rather than becoming unlimited.
+    Defaults are conservative; tune up for heavier code-mode workloads.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -29,10 +31,18 @@ class MontyLimits(BaseModel):
     """Sandbox heap cap in bytes. ``None`` = unlimited."""
 
     max_stack_depth: int | None = 256
-    """Sandbox recursion limit. ``None`` = unlimited."""
+    """Sandbox recursion limit. ``None`` keeps Monty's default of 1000."""
 
-    max_allocations: int | None = 1_000_000
-    """Total allocation count budget. ``None`` = unlimited."""
+    max_suspensions: int | None = None
+    """Suspensions allowed per call; ``None`` keeps Monty's default of 1000.
+
+    A suspension is any pause the driver has to answer: a host-function call,
+    an OS callback, an undefined-name lookup, or a future resolution. It is a
+    strictly wider count than ``iteration_budget``, which caps host-tool calls
+    alone — filesystem-heavy sandbox code can exhaust this without making a
+    single host-tool call. Enforced by Monty's worker pool, which aborts an
+    over-budget run with an uncatchable ``RuntimeError``.
+    """
 
     gc_interval: int | None = None
     """Allocations between sandbox GC cycles; ``None`` keeps Monty's default.
@@ -53,7 +63,7 @@ class MontyLimits(BaseModel):
             "max_duration_secs": self.max_duration_secs,
             "max_memory": self.max_memory_bytes,
             "max_recursion_depth": self.max_stack_depth,
-            "max_allocations": self.max_allocations,
+            "max_suspensions": self.max_suspensions,
             "gc_interval": self.gc_interval,
         }
         return ResourceLimits(**{k: v for k, v in mapped.items() if v is not None})

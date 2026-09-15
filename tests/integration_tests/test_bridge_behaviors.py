@@ -270,6 +270,29 @@ class TestResultShapes:
         assert r["error"] is None
         assert sorted(r["result"]["$set"]) == [1, 2, 3]
 
+    def test_nested_non_json_values_are_tagged_in_place(self):
+        """Tagging recurses: the offending type is usually nested, not top level."""
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "{'a': (1, {2})}")
+        assert r["error"] is None
+        assert r["result"] == {"a": {"$tuple": [1, {"$set": [2]}]}}
+
+    def test_bytes_result_is_base64_tagged(self):
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "b'abc'")
+        assert r["error"] is None
+        assert r["result"] == {"$bytes": "YWJj"}
+
+    def test_dataclass_result_keeps_name_and_attributes(self):
+        m = MontyCodeInterpreterMiddleware()
+        code = (
+            "from dataclasses import dataclass\n"
+            "@dataclass\nclass P:\n    x: int\nP(7)"
+        )
+        r = _run(m, code)
+        assert r["error"] is None
+        assert r["result"] == {"$object": {"name": "P", "attributes": {"x": 7}}}
+
     def test_runtime_error_carries_real_type_and_traceback(self):
         m = MontyCodeInterpreterMiddleware()
         r = _run(m, "x = [1]\nx[5]")
@@ -349,3 +372,44 @@ class TestDeferredSchemaRendering:
         m = MontyCodeInterpreterMiddleware(ptc=[search], system_prompt=None)
         assert m.system_prompt is None
         assert "A searchable index" in m._tool.description
+
+
+class TestSandboxOSAccess:
+    """OS calls, against the real VM.
+
+    Monty surfaces OS calls as snapshots and only consults the ``os=`` handler
+    from ``resume_auto()``, which the driver does not use — so servicing them
+    is the driver's job. A driver that bounced them back would fail here and
+    nowhere else, which is why these live against the real VM rather than mocks.
+    """
+
+    def test_clock_call_is_serviced_host_side(self):
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "from datetime import datetime\ndatetime.now().year >= 2024")
+        assert r["error"] is None
+        assert r["result"] is True
+
+    def test_missing_file_raises_inside_the_sandbox(self):
+        """An unreadable path is an ordinary sandbox exception, not a driver crash."""
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "from pathlib import Path\nPath('/nope.txt').read_text()")
+        assert r["error"]["type"] == "FileNotFoundError"
+
+    def test_host_filesystem_is_not_reachable(self):
+        """The virtual filesystem starts empty: a real host file stays invisible."""
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "from pathlib import Path\nPath('/etc/passwd').read_text()")
+        assert r["error"]["type"] == "FileNotFoundError"
+
+    def test_host_environment_is_not_reachable(self):
+        m = MontyCodeInterpreterMiddleware()
+        r = _run(m, "import os\nos.getenv('HOME')")
+        assert r["error"] is None
+        assert r["result"] is None
+
+    async def test_clock_call_is_serviced_on_the_async_path(self):
+        """The async driver services OS snapshots too — separate code path."""
+        m = MontyCodeInterpreterMiddleware()
+        r = await _arun(m, "from datetime import datetime\ndatetime.now().year >= 2024")
+        assert r["error"] is None
+        assert r["result"] is True

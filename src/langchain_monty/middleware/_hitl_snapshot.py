@@ -13,7 +13,7 @@ import base64
 
 from langchain.tools import ToolRuntime
 from langgraph.types import interrupt
-from pydantic_monty import FunctionSnapshot
+from pydantic_monty import AsyncFunctionSnapshot, FunctionSnapshot
 
 from langchain_monty.models import LangchainStoreMontySnapshot
 
@@ -37,7 +37,7 @@ def _hitl_store_key(runtime: ToolRuntime) -> str | None:
 
 
 def _make_hitl_record(
-    progress: FunctionSnapshot,
+    progress: FunctionSnapshot | AsyncFunctionSnapshot,
     stdout_text: str,
     host_calls: int,
     interrupts_answered: int,
@@ -52,7 +52,7 @@ def _make_hitl_record(
 
 def _persist_hitl_record(
     runtime: ToolRuntime,
-    progress: FunctionSnapshot,
+    progress: FunctionSnapshot | AsyncFunctionSnapshot,
     stdout_text: str,
     host_calls: int,
     interrupts_answered: int,
@@ -73,7 +73,7 @@ def _persist_hitl_record(
 
 async def _apersist_hitl_record(
     runtime: ToolRuntime,
-    progress: FunctionSnapshot,
+    progress: FunctionSnapshot | AsyncFunctionSnapshot,
     stdout_text: str,
     host_calls: int,
     interrupts_answered: int,

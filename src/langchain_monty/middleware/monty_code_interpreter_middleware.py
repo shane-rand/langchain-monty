@@ -27,8 +27,8 @@ from langchain_monty.models import MontyLimits
 CODE_INTERPRETER_SYSTEM_PROMPT = """## `eval_python` (Monty runtime)
 
 You have access to ``eval_python``, which runs Python code in Pydantic's
-Monty interpreter — a Rust-implemented Python subset that starts in
-microseconds and has no access to the host's filesystem, network, or
+Monty interpreter — a Rust-implemented Python subset that runs in an
+isolated sandbox with no access to the host's filesystem, network, or
 environment. The only way out of the sandbox is calling functions that have
 been explicitly exposed to it.
 
@@ -192,7 +192,7 @@ class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 runtime=runtime,
                 limits=limits,
                 iteration_budget=budget,
-                compile_kwargs=_compile_kwargs(host_tools, type_check, ptc),
+                session_kwargs=_session_kwargs(host_tools, type_check, ptc),
             )
 
         def eval_python(
@@ -321,12 +321,23 @@ def _resolve_host_tools(
     return resolved_tools
 
 
-def _compile_kwargs(
+def _session_kwargs(
     host_tools: dict[str, BaseTool],
     type_check_enabled: bool,
     ptc: frozenset[str],
 ) -> dict[str, Any]:
+    """Type-check configuration for ``Monty.checkout()``.
+
+    ``type_check_format`` is set here rather than at the error, because Monty's
+    structured diagnostics never leave the worker: the rendering is chosen when
+    the session is checked out, and ``MontyTypingError.display()`` just returns
+    what the worker already rendered.
+    """
     if not type_check_enabled:
         return {}
     stubs = _render_type_stubs(host_tools, ptc)
-    return {"type_check": True, "type_check_stubs": stubs}
+    return {
+        "type_check": True,
+        "type_check_stubs": stubs,
+        "type_check_format": "concise",
+    }
