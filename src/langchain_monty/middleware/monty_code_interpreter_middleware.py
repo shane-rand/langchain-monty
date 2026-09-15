@@ -85,10 +85,6 @@ Example:
 """
 
 
-class _UnawaitedHostCalls(Exception):
-    """Deferred pass ended with never-awaited futures; driver should restart eagerly."""
-
-
 class MontyCodeInterpreterMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
     """Middleware that adds an ``eval_python`` tool backed by Monty.
 
