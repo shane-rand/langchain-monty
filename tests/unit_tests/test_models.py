@@ -119,7 +119,7 @@ class TestMontyLimits:
             max_suspensions=9999,
         )
         rl = lim.to_monty()
-        assert rl["max_duration_secs"] == 3.0
+        assert rl["max_feed_duration_secs"] == 3.0
         assert rl["max_memory"] == 1024
         assert rl["max_recursion_depth"] == 128
         assert rl["max_suspensions"] == 9999
@@ -139,7 +139,7 @@ class TestMontyLimits:
 
     def test_to_monty_drops_none_fields(self):
         rl = MontyLimits(max_duration_secs=None, max_suspensions=None).to_monty()
-        assert "max_duration_secs" not in rl
+        assert "max_feed_duration_secs" not in rl
         assert "max_suspensions" not in rl
 
     def test_frozen(self):
@@ -153,7 +153,7 @@ class TestMontyLimits:
         # the dict rather than forwarded.
         lim = MontyLimits(max_duration_secs=None, max_memory_bytes=None)
         rl = lim.to_monty()
-        assert "max_duration_secs" not in rl
+        assert "max_feed_duration_secs" not in rl
         assert "max_memory" not in rl
         assert rl["max_recursion_depth"] == 256  # defaults still forwarded
 

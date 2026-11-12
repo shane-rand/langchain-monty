@@ -434,7 +434,12 @@ def _os_result(
     unhandled-operation behaviour.
     """
     try:
-        value = os_handler(progress.function_name, progress.args, progress.kwargs)
+        value = os_handler(
+            name=progress.function_name,
+            args=progress.args,
+            kwargs=progress.kwargs,
+            is_async=False,
+        )
     except Exception as exc:  # noqa: BLE001
         return make_exception_result(exc)
     if value is NOT_HANDLED:
