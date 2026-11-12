@@ -368,7 +368,12 @@ class TestEvalPythonSync:
         with _mock_pool(snap, os_handler=os_handler):
             self._invoke(m, "Path('/data/a.txt').read_text()", runtime)
 
-        os_handler.assert_called_once_with("Path.read_text", ("/data/a.txt",), {})
+        os_handler.assert_called_once_with(
+            name="Path.read_text",
+            args=("/data/a.txt",),
+            kwargs={},
+            is_async=False,
+        )
         snap.resume.assert_called_once_with({"return_value": "hello"})
         snap.resume_not_handled.assert_not_called()
 

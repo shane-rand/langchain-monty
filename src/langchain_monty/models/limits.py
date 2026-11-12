@@ -7,10 +7,12 @@ from pydantic_monty import ResourceLimits
 class MontyLimits(BaseModel):
     """Resource ceilings forwarded to ``pydantic_monty.ResourceLimits``.
 
-    Naming note: two field names deliberately differ from the upstream
+    Naming note: three field names deliberately differ from the upstream
     ``ResourceLimits`` TypedDict for clarity at this package's API surface —
     ``max_memory_bytes`` (upstream ``max_memory``: the unit is otherwise
-    ambiguous) and ``max_stack_depth`` (upstream ``max_recursion_depth``).
+    ambiguous), ``max_stack_depth`` (upstream ``max_recursion_depth``) and
+    ``max_duration_secs`` (upstream ``max_feed_duration_secs``, the budget for
+    one whole ``eval_python`` call).
     ``to_monty()`` performs the mapping, so the rename never leaks into
     Monty itself.
 
@@ -60,7 +62,7 @@ class MontyLimits(BaseModel):
         Rust side).
         """
         mapped: dict = {
-            "max_duration_secs": self.max_duration_secs,
+            "max_feed_duration_secs": self.max_duration_secs,
             "max_memory": self.max_memory_bytes,
             "max_recursion_depth": self.max_stack_depth,
             "max_suspensions": self.max_suspensions,
