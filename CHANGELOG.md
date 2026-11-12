@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v4.0.0 (2026-11-12)
+
+### Chores
+
+- Sync uv.lock package version to 3.0.0
+  ([`0fd3035`](https://github.com/shane-rand/langchain-monty/commit/0fd303589d9bc583bfad8c0641ac6d6b259b0f12))
+
+### Documentation
+
+- Regenerate CHANGELOG and restore its insertion marker
+  ([`cb4c6aa`](https://github.com/shane-rand/langchain-monty/commit/cb4c6aa7b548492af4705265fd7161817a8ae947))
+
+### Features
+
+- Upgrade pydantic-monty to 1.6.0 and refresh dependencies
+  ([`e19e485`](https://github.com/shane-rand/langchain-monty/commit/e19e4852c312c59ef491ad68a83c1f39ce779002))
+
+### Breaking Changes
+
+- Requires pydantic-monty>=1.6.0 (previously >=0.0.23).
+
+
 ## v3.0.0 (2026-09-16)
 
 ### Bug Fixes
